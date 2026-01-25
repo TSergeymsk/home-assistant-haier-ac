@@ -214,9 +214,6 @@ class HaierProtocol:
             # Парсим данные состояния если это команда состояния (0x22)
             state_data = {}
             if cmd_type == 0x22 and len(command) >= 34:
-                # Исправленный парсинг на основе анализа структуры пакетов
-                # Команда имеет формат: ff ff 22 00 00 00 00 00 01 06 6d 01 00 1d 00 12 00 7f ...
-                
                 # Конвертируем в список uint16
                 num_words = len(command) // 2
                 words = []
@@ -226,53 +223,41 @@ class HaierProtocol:
                 
                 _LOGGER.debug(f"Command as 16-bit words: {words}")
                 
+                # Используем структуру stateParser из TS библиотеки
+                # words[0]: 0xffff
+                # words[1]: 0x2200
+                # words[2-5]: неизвестные (4 слова)
+                # words[6]: currentTemperature
+                # words[7-10]: 4 неизвестных слова
+                # words[11]: mode
+                # words[12]: fanSpeed
+                # words[13]: limits
+                # words[14]: power
+                # words[15]: health
+                # words[16]: неизвестное
+                # words[17]: targetTemperature
+                
                 if len(words) >= 18:
-                    # Исправленный парсинг на основе анализа пакетов:
-                    # word[0]: 0xffff - маркер начала команды
-                    # word[1]: 0x2200 - тип команды (state response)
-                    # word[2-5]: неизвестные данные
-                    # word[6]: текущая температура (29, 27) ✓
-                    # word[7]: что-то (18, 18) - возможно влажность или что-то еще
-                    # word[8]: скорость вентилятора (0x7f = AUTO -> 0)
-                    # word[9-10]: нули
-                    # word[11]: режим (1 = COOL)
-                    # word[12]: пределы (0 или 3)
-                    # word[13]: нули
-                    # word[14]: что-то (16 или 0)
-                    # word[15-16]: нули
-                    # word[17]: целевая температура - 16 (8 -> 24°C)
+                    state_data['current_temperature'] = words[6]
+                    state_data['target_temperature'] = words[17] + 16
+                    state_data['mode'] = words[11]
                     
-                    # Текущая температура: слово 6
-                    state_data['current_temperature'] = words[6]  # 29, 27
-                    
-                    # Целевая температура: слово 17 + 16
-                    state_data['target_temperature'] = words[17] + 16  # 8 + 16 = 24
-                    
-                    # Режим: слово 11
-                    state_data['mode'] = words[11]  # 1 = COOL
-                    
-                    # Скорость вентилятора: слово 8, 0x7f -> 0 (AUTO)
-                    fan_speed = words[8]
+                    # Преобразование fanSpeed: 0x7f -> 0 (AUTO)
+                    fan_speed = words[12]
                     if fan_speed == 0x7f:
-                        state_data['fan_speed'] = 0  # AUTO
+                        state_data['fan_speed'] = 0
                     else:
                         state_data['fan_speed'] = fan_speed
                     
-                    # Пределы: слово 12
-                    state_data['limits'] = words[12]  # 0 или 3
+                    state_data['limits'] = words[13]
                     
-                    # Питание: слово 13? В логах всегда True, но посмотрим на слово 13
-                    # В обоих случаях слово 13 = 0, но power=True
-                    # Возможно, питание определяется по слову 11 (mode)? Или слово 14?
-                    # Из TS библиотеки: power = Boolean(power % 2), где power - слово 20
-                    # У нас нет столько слов. Пока установим True
-                    state_data['power'] = True
+                    # Преобразование power: четное -> False, нечетное -> True
+                    power_raw = words[14]
+                    state_data['power'] = bool(power_raw % 2)
                     
-                    # Здоровье: слово 14? В первом случае 16, во втором 0, но health=False в обоих
-                    # Возможно, здоровье определяется по четности слова 14
-                    if len(words) > 14:
-                        health_raw = words[14]
-                        state_data['health'] = bool(health_raw % 2)  # 16%2=0, 0%2=0 → False
+                    # Преобразование health: аналогично
+                    health_raw = words[15]
+                    state_data['health'] = bool(health_raw % 2)
             
             frame_length = pos + cmd_len
             
