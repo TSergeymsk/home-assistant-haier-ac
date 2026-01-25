@@ -46,27 +46,31 @@ class HaierProtocol:
         if len(self.mac) != 12:
             raise ValueError(f"Invalid MAC address length: {mac_address}")
     
-    def create_hello_packet(self) -> bytes:
+    def create_hello_packet(self, seq: int = 0) -> bytes:
         """Create hello packet."""
-        # Based on TS library: hello command
-        return bytes.fromhex('00 00 27 14 00 00 00 00') + \
-               bytes(16) + bytes(16) + \
-               self._mac_address_bytes() + \
-               bytes(16) + \
-               bytes([0x00, 0x00, 0x00, 0x00]) + \
-               bytes([0x00, 0x00, 0x00, 0x13]) + \
-               bytes.fromhex('ff ff 0a 00 00 00 00 00 00 01 4d 01 59')
+        # Based on TS library: hello command with sequence
+        header = bytes.fromhex('00 00 27 14 00 00 00 00')
+        zeros = bytes(16) + bytes(16)
+        mac_bytes = self._mac_address_bytes()
+        zeros2 = bytes(16)
+        seq_bytes = bytes([0x00, 0x00, 0x00, seq % 256])
+        cmd_len = bytes([0x00, 0x00, 0x00, 0x13])  # 19 bytes for hello command
+        command = bytes.fromhex('ff ff 0a 00 00 00 00 00 00 01 4d 01 59')
+        
+        return header + zeros + mac_bytes + zeros2 + seq_bytes + cmd_len + command
     
-    def create_init_packet(self) -> bytes:
+    def create_init_packet(self, seq: int = 0) -> bytes:
         """Create initialization packet."""
-        # Based on TS library: init command
-        return bytes.fromhex('00 00 27 14 00 00 00 00') + \
-               bytes(16) + bytes(16) + \
-               self._mac_address_bytes() + \
-               bytes(16) + \
-               bytes([0x00, 0x00, 0x00, 0x00]) + \
-               bytes([0x00, 0x00, 0x00, 0x0d]) + \
-               bytes.fromhex('ff ff 08 00 00 00 00 00 00 73 7b')
+        # Based on TS library: init command with sequence
+        header = bytes.fromhex('00 00 27 14 00 00 00 00')
+        zeros = bytes(16) + bytes(16)
+        mac_bytes = self._mac_address_bytes()
+        zeros2 = bytes(16)
+        seq_bytes = bytes([0x00, 0x00, 0x00, seq % 256])
+        cmd_len = bytes([0x00, 0x00, 0x00, 0x0d])  # 13 bytes for init command
+        command = bytes.fromhex('ff ff 08 00 00 00 00 00 00 73 7b')
+        
+        return header + zeros + mac_bytes + zeros2 + seq_bytes + cmd_len + command
     
     def _mac_address_bytes(self) -> bytes:
         """Convert MAC address to bytes as in TS library."""
@@ -75,38 +79,44 @@ class HaierProtocol:
         mac_with_padding = mac_ascii + b'\x00\x00\x00\x00'
         return mac_with_padding.ljust(16, b'\x00')
     
-    def create_status_request_packet(self) -> bytes:
+    def create_status_request_packet(self, seq: int = 10) -> bytes:
         """Create status request packet."""
         # Simple status request - use hello format but different command
-        return bytes.fromhex('00 00 27 14 00 00 00 00') + \
-               bytes(16) + bytes(16) + \
-               self._mac_address_bytes() + \
-               bytes(16) + \
-               bytes([0x00, 0x00, 0x00, 0x00]) + \
-               bytes([0x00, 0x00, 0x00, 0x0d]) + \
-               bytes.fromhex('ff ff 01 00 00 00 00 00 00 01 4d 00 4c')
+        header = bytes.fromhex('00 00 27 14 00 00 00 00')
+        zeros = bytes(16) + bytes(16)
+        mac_bytes = self._mac_address_bytes()
+        zeros2 = bytes(16)
+        seq_bytes = bytes([0x00, 0x00, 0x00, seq % 256])
+        cmd_len = bytes([0x00, 0x00, 0x00, 0x0d])  # 13 bytes for status request
+        command = bytes.fromhex('ff ff 01 00 00 00 00 00 00 01 4d 00 4c')
+        
+        return header + zeros + mac_bytes + zeros2 + seq_bytes + cmd_len + command
     
-    def create_on_packet(self) -> bytes:
+    def create_on_packet(self, seq: int = 1) -> bytes:
         """Create packet to turn device on."""
-        return bytes.fromhex('00 00 27 14 00 00 00 00') + \
-               bytes(16) + bytes(16) + \
-               self._mac_address_bytes() + \
-               bytes(16) + \
-               bytes([0x00, 0x00, 0x00, 0x00]) + \
-               bytes([0x00, 0x00, 0x00, 0x13]) + \
-               bytes.fromhex('ff ff 0a 00 00 00 00 00 00 01 4d 02 5a')
+        header = bytes.fromhex('00 00 27 14 00 00 00 00')
+        zeros = bytes(16) + bytes(16)
+        mac_bytes = self._mac_address_bytes()
+        zeros2 = bytes(16)
+        seq_bytes = bytes([0x00, 0x00, 0x00, seq % 256])
+        cmd_len = bytes([0x00, 0x00, 0x00, 0x13])  # 19 bytes for on command
+        command = bytes.fromhex('ff ff 0a 00 00 00 00 00 00 01 4d 02 5a')
+        
+        return header + zeros + mac_bytes + zeros2 + seq_bytes + cmd_len + command
     
-    def create_off_packet(self) -> bytes:
+    def create_off_packet(self, seq: int = 1) -> bytes:
         """Create packet to turn device off."""
-        return bytes.fromhex('00 00 27 14 00 00 00 00') + \
-               bytes(16) + bytes(16) + \
-               self._mac_address_bytes() + \
-               bytes(16) + \
-               bytes([0x00, 0x00, 0x00, 0x00]) + \
-               bytes([0x00, 0x00, 0x00, 0x13]) + \
-               bytes.fromhex('ff ff 0a 00 00 00 00 00 00 01 4d 03 5b')
+        header = bytes.fromhex('00 00 27 14 00 00 00 00')
+        zeros = bytes(16) + bytes(16)
+        mac_bytes = self._mac_address_bytes()
+        zeros2 = bytes(16)
+        seq_bytes = bytes([0x00, 0x00, 0x00, seq % 256])
+        cmd_len = bytes([0x00, 0x00, 0x00, 0x13])  # 19 bytes for off command
+        command = bytes.fromhex('ff ff 0a 00 00 00 00 00 00 01 4d 03 5b')
+        
+        return header + zeros + mac_bytes + zeros2 + seq_bytes + cmd_len + command
     
-    def create_set_state_packet(self, state: State) -> bytes:
+    def create_set_state_packet(self, state: State, seq: int = 1) -> bytes:
         """Create packet to set device state."""
         # Build command like in TS library
         hex_str = 'ff ff 22 00 00 00 00 00 00 01 4d 5f 00 00 00 00 00 00 00 00 00 00'
@@ -137,13 +147,14 @@ class HaierProtocol:
         command = bytes.fromhex(hex_str.replace(' ', ''))
         command_len = len(command)
         
-        return bytes.fromhex('00 00 27 14 00 00 00 00') + \
-               bytes(16) + bytes(16) + \
-               self._mac_address_bytes() + \
-               bytes(16) + \
-               bytes([0x00, 0x00, 0x00, 0x00]) + \
-               bytes([0x00, 0x00, 0x00, command_len]) + \
-               command
+        header = bytes.fromhex('00 00 27 14 00 00 00 00')
+        zeros = bytes(16) + bytes(16)
+        mac_bytes = self._mac_address_bytes()
+        zeros2 = bytes(16)
+        seq_bytes = bytes([0x00, 0x00, 0x00, seq % 256])
+        cmd_len_bytes = bytes([0x00, 0x00, 0x00, command_len])
+        
+        return header + zeros + mac_bytes + zeros2 + seq_bytes + cmd_len_bytes + command
     
     def parse_response(self, data: bytes) -> List[Dict[str, Any]]:
         """Parse response frames from device."""
@@ -170,15 +181,22 @@ class HaierProtocol:
             return None
         
         try:
-            # Skip header and zeros
-            pos = 8
+            # Parse like TS library parser
+            pos = 0
+            
+            # Check header
+            if data[pos:pos+8] != b'\x00\x00\x27\x15\x00\x00\x00\x00':
+                return None
+            pos += 8
             
             # Skip 32 bytes of zeros
             pos += 32
             
             # Parse MAC address (16 bytes, first 12 are MAC ASCII)
-            mac_end = pos + 12
-            mac_bytes = data[pos:mac_end]
+            if pos + 16 > len(data):
+                return None
+            
+            mac_bytes = data[pos:pos+12]
             mac = mac_bytes.decode('ascii', errors='ignore')
             pos += 16
             
@@ -186,10 +204,16 @@ class HaierProtocol:
             pos += 16
             
             # Get sequence (4 bytes, last byte is seq)
+            if pos + 4 > len(data):
+                return None
+            
             seq = data[pos + 3]
             pos += 4
             
             # Get command length (4 bytes, last byte is length)
+            if pos + 4 > len(data):
+                return None
+            
             cmd_len = data[pos + 3]
             pos += 4
             
@@ -208,29 +232,32 @@ class HaierProtocol:
             state_data = {}
             if cmd_type == 0x22 and len(command) >= 34:
                 # Parse state according to TS library structure
-                # Find 0xffff in command
-                for j in range(len(command) - 1):
-                    if command[j] == 0xff and command[j+1] == 0xff:
-                        state_start = j + 2
-                        if state_start + 26 < len(command):
-                            # Current temperature at offset +6
-                            state_data['current_temperature'] = command[state_start + 6]
-                            # Target temperature at offset +26 (with +16 offset)
-                            target_temp_raw = command[state_start + 26]
-                            state_data['target_temperature'] = target_temp_raw + 16
-                            # Mode at offset +14
-                            state_data['mode'] = command[state_start + 14]
-                            # Fan speed at offset +16
-                            state_data['fan_speed'] = command[state_start + 16]
-                            # Limits at offset +18
-                            state_data['limits'] = command[state_start + 18]
-                            # Power at offset +20 (odd = on, even = off)
-                            power_raw = command[state_start + 20]
-                            state_data['power'] = bool(power_raw % 2)
-                            # Health at offset +22
-                            health_raw = command[state_start + 22]
-                            state_data['health'] = bool(health_raw % 2)
-                        break
+                # The state data starts at byte 10 of the command
+                if len(command) >= 34:
+                    # Parse structure: 0xffff + 8 bytes + data
+                    # Current temperature at offset 8 (0-based from start of command)
+                    state_data['current_temperature'] = command[8]
+                    
+                    # Mode at offset 16
+                    state_data['mode'] = command[16]
+                    
+                    # Fan speed at offset 18
+                    state_data['fan_speed'] = command[18]
+                    
+                    # Limits at offset 20
+                    state_data['limits'] = command[20]
+                    
+                    # Power at offset 22 (odd = on, even = off)
+                    power_raw = command[22]
+                    state_data['power'] = bool(power_raw % 2)
+                    
+                    # Health at offset 24
+                    health_raw = command[24]
+                    state_data['health'] = bool(health_raw % 2)
+                    
+                    # Target temperature at offset 28 (with +16 offset)
+                    target_temp_raw = command[28]
+                    state_data['target_temperature'] = target_temp_raw + 16
             
             frame_length = pos + cmd_len
             
@@ -246,13 +273,3 @@ class HaierProtocol:
         except Exception as e:
             _LOGGER.debug(f"Error parsing frame: {e}")
             return None
-    
-    def _build_frame(self, frame_type: int, data: bytes = b'', with_crc: bool = False) -> bytes:
-        """Build frame for ACK response."""
-        # Simplified frame builder for ACK responses
-        return data  # For now, just return the data
-    
-    def create_ack_response_packet(self, ack_data: bytes = b'\x5a\x00') -> bytes:
-        """Create ACK response packet."""
-        # Simple ACK packet
-        return ack_data
