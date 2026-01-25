@@ -67,38 +67,38 @@ class HaierDevice:
         
         _LOGGER.info(f"Initialized Haier device {name} at {ip_address}:{self.port}")
 
-async def async_connect(self):
-    """Connect to the device using official protocol."""
-    try:
-        # Test connection first
-        if not await self.hass.async_add_executor_job(test_connection, self.ip_address):
-            raise ConnectionError(f"Cannot connect to device at {self.ip_address}:{self.port}")
-        
-        # Establish TCP connection
-        await self._establish_connection()
-        
-        # Send hello packet and wait for response
-        hello_packet = self.protocol.create_hello_packet()
-        _LOGGER.debug(f"Sending hello packet: {hello_packet.hex()}")
-        await self._send_raw_packet(hello_packet)
-        
-        # Wait for response (give it some time)
-        await asyncio.sleep(1.0)
-        
-        # Send init packet
-        init_packet = self.protocol.create_init_packet()
-        _LOGGER.debug(f"Sending init packet: {init_packet.hex()}")
-        await self._send_raw_packet(init_packet)
-        
-        await asyncio.sleep(1.0)
-        
-        self._connected = True
-        _LOGGER.info(f"Connected to Haier device {self.name} using official protocol")
-        
-    except Exception as ex:
-        _LOGGER.error(f"Failed to connect to device: {ex}")
-        await self._close_connection()
-        raise
+    async def async_connect(self):
+        """Connect to the device using official protocol."""
+        try:
+            # Test connection first
+            if not await self.hass.async_add_executor_job(test_connection, self.ip_address):
+                raise ConnectionError(f"Cannot connect to device at {self.ip_address}:{self.port}")
+            
+            # Establish TCP connection
+            await self._establish_connection()
+            
+            # Send hello packet and wait for response
+            hello_packet = self.protocol.create_hello_packet()
+            _LOGGER.debug(f"Sending hello packet: {hello_packet.hex()}")
+            await self._send_raw_packet(hello_packet)
+            
+            # Wait for response (give it some time)
+            await asyncio.sleep(1.0)
+            
+            # Send init packet
+            init_packet = self.protocol.create_init_packet()
+            _LOGGER.debug(f"Sending init packet: {init_packet.hex()}")
+            await self._send_raw_packet(init_packet)
+            
+            await asyncio.sleep(1.0)
+            
+            self._connected = True
+            _LOGGER.info(f"Connected to Haier device {self.name} using official protocol")
+            
+        except Exception as ex:
+            _LOGGER.error(f"Failed to connect to device: {ex}")
+            await self._close_connection()
+            raise
 
     async def _establish_connection(self):
         """Establish TCP connection."""

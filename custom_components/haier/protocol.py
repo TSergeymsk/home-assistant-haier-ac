@@ -8,6 +8,24 @@ from enum import IntEnum
 
 _LOGGER = logging.getLogger(__name__)
 
+# Добавленные enum - которые отсутствовали
+class Mode(IntEnum):
+    AUTO = 0
+    COOL = 1
+    HEAT = 2
+    DRY = 3
+    FAN = 4
+
+class FanSpeed(IntEnum):
+    AUTO = 0
+    LOW = 1
+    MEDIUM = 2
+    HIGH = 3
+
+class Limits(IntEnum):
+    OFF = 0
+    ONLY_VERTICAL = 1
+
 # Protocol constants from official documentation
 FRAME_SEPARATOR = b'\xFF\xFF'
 FRAME_FLAG_WITH_CRC = 0x40
