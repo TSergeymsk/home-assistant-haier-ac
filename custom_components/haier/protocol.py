@@ -1,59 +1,56 @@
-"""Protocol implementation for Haier AC based on haier-ac-remote library."""
+"""Protocol implementation for Haier AC based on official protocol specification."""
 import struct
 import logging
-from typing import Dict, Any, Optional, Tuple, List
+import crcmod
+from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
 from enum import IntEnum
 
 _LOGGER = logging.getLogger(__name__)
 
-# Constants from haier-ac-remote
-class FanSpeed(IntEnum):
-    AUTO = 0x00
-    MIN = 0x01
-    MID = 0x02
-    MAX = 0x03
+# Protocol constants from official documentation
+FRAME_SEPARATOR = b'\xFF\xFF'
+FRAME_FLAG_WITH_CRC = 0x40
+FRAME_FLAG_NO_CRC = 0x00
 
-class Mode(IntEnum):
-    FAN = 0x00
-    COOL = 0x01
-    HEAT = 0x02
-    AUTO = 0x03
-    DRY = 0x04
+# Protocol types (need to be determined experimentally)
+PROTOCOL_TYPE_SMARTAIR2 = 0x01  # For older units
+PROTOCOL_TYPE_HON = 0x02        # For newer units with hOn app
 
-class Limits(IntEnum):
-    OFF = 0x00
-    ONLY_VERTICAL = 0x01
-
-class CommandType(IntEnum):
-    XZ1 = 0x10
-    STATE = 0x22
-
-class PayloadType(IntEnum):
-    REQUEST = 0x14
-    RESPONSE = 0x15
+# Command types based on observed behavior
+CMD_TYPE_STATUS_REQUEST = 0x01
+CMD_TYPE_STATUS_RESPONSE = 0x02
+CMD_TYPE_CONTROL = 0x03
+CMD_TYPE_ACK = 0x04
+CMD_TYPE_HELLO = 0x0A
+CMD_TYPE_INIT = 0x08
 
 @dataclass
 class State:
     """Device state structure."""
     current_temperature: int = 21
     target_temperature: int = 21
-    fan_speed: FanSpeed = FanSpeed.AUTO
-    mode: Mode = Mode.FAN
+    fan_speed: int = 0  # 0=auto, 1=low, 2=medium, 3=high
+    mode: int = 0       # 0=fan, 1=cool, 2=heat, 3=auto, 4=dry
     health: bool = False
-    limits: Limits = Limits.OFF
+    limits: int = 0     # 0=off, 1=vertical only
     power: bool = False
+    display: bool = True
+    beep: bool = True
 
 class HaierProtocol:
-    """Protocol handler for Haier AC communication."""
+    """Protocol handler for Haier AC communication using official protocol."""
     
-    def __init__(self, mac_address: str):
+    def __init__(self, mac_address: str, protocol_type: int = PROTOCOL_TYPE_SMARTAIR2):
         """Initialize protocol handler."""
-        # MAC address should be 12 hex chars, uppercase
+        # MAC address should be 12 hex chars
         self.mac = mac_address.upper().replace(':', '').replace('-', '')
         if len(self.mac) != 12:
             raise ValueError(f"Invalid MAC address length: {mac_address}")
+        
+        self.protocol_type = protocol_type
         self.seq = 0
+        self.crc16_func = crcmod.predefined.mkPredefinedCrcFun('crc-16')
         
     def _get_next_seq(self) -> int:
         """Get next sequence number."""
@@ -61,340 +58,213 @@ class HaierProtocol:
         self.seq = (self.seq + 1) % 256
         return seq
     
-    def _mac_to_bytes(self) -> bytes:
-        """Convert MAC address to protocol format (12 chars + 4 zeros)."""
-        # MAC as ASCII bytes + 4 zero bytes
-        mac_bytes = self.mac.encode('ascii')
-        return mac_bytes + b'\x00' * 4
-    
-    def _calculate_checksum(self, data: bytes) -> int:
-        """Calculate checksum for command data."""
-        # From raw-commands.ts: appendChecksum function
-        # Simple sum of bytes
-        total = sum(data)
-        checksum = total & 0xFF
-        return checksum
+    def _build_frame(self, frame_type: int, data: bytes = b'', with_crc: bool = True) -> bytes:
+        """Build a frame according to Haier protocol structure [citation:5]."""
+        # Frame structure:
+        # - Separator: 2 bytes (0xFF 0xFF)
+        # - Length: 1 byte (total frame length)
+        # - Flags: 1 byte (0x40 = with CRC, 0x00 = without)
+        # - Reserved: 5 bytes (0x00)
+        # - Type: 1 byte
+        # - Data: n bytes
+        # - Checksum: 1 byte (sum of bytes except separator and checksum itself)
+        # - CRC: 2 bytes (only if flags indicate)
+        
+        # Build frame without separator, checksum and CRC
+        flags = FRAME_FLAG_WITH_CRC if with_crc else FRAME_FLAG_NO_CRC
+        reserved = b'\x00' * 5
+        
+        frame_without_extras = bytes([
+            flags
+        ]) + reserved + bytes([frame_type]) + data
+        
+        # Calculate length (includes flags, reserved, type, data, checksum, and CRC if present)
+        length = len(frame_without_extras) + 1  # +1 for checksum
+        if with_crc:
+            length += 2  # +2 for CRC
+        
+        # Calculate checksum (sum of all bytes except separator and checksum itself)
+        # This includes length byte too
+        frame_for_checksum = bytes([length]) + frame_without_extras
+        checksum = sum(frame_for_checksum) & 0xFF
+        
+        # Build final frame
+        frame = FRAME_SEPARATOR + bytes([length]) + frame_without_extras + bytes([checksum])
+        
+        # Add CRC if needed
+        if with_crc:
+            # CRC is calculated on everything except separator, checksum and CRC itself
+            crc_data = frame[2:-1]  # Skip separator and checksum
+            crc = self.crc16_func(crc_data)
+            frame += struct.pack('<H', crc)  # Little endian
+        
+        return frame
     
     def create_hello_packet(self) -> bytes:
-        """Create hello packet (before init)."""
-        seq = self._get_next_seq()
-        
-        # Header: 00 00 27 14 00 00 00 00
-        header = b'\x00\x00\x27\x14\x00\x00\x00\x00'
-        
-        # 16 zero bytes
-        zero16 = b'\x00' * 16
-        
-        # Another 16 zero bytes  
-        zero16_2 = b'\x00' * 16
-        
-        # MAC address (12 chars + 4 zeros)
-        mac_bytes = self._mac_to_bytes()
-        
-        # Another 16 zero bytes
-        zero16_3 = b'\x00' * 16
-        
-        # Order byte (sequence)
-        order_byte = seq.to_bytes(1, 'big')
-        order_part = b'\x00\x00\x00' + order_byte
-        
-        # Command length and command
-        # hello(): ff ff 0a 00 00 00 00 00 00 01 4d 01 59
-        command = b'\xff\xff\x0a\x00\x00\x00\x00\x00\x00\x01\x4d\x01\x59'
-        cmd_len = len(command)
-        len_part = b'\x00\x00\x00' + cmd_len.to_bytes(1, 'big')
-        
-        # Build packet
-        packet = (
-            header + 
-            zero16 + 
-            zero16_2 + 
-            mac_bytes +
-            zero16_3 +
-            order_part +
-            len_part +
-            command
-        )
-        
-        return packet
+        """Create hello packet to initiate communication."""
+        # Based on observed data: hello command is 0x0A with specific data
+        # Data from original: 0x00 0x00 0x00 0x00 0x00 0x01 0x4D 0x01 0x59
+        hello_data = bytes([
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x4D, 0x01, 0x59
+        ])
+        return self._build_frame(CMD_TYPE_HELLO, hello_data)
     
     def create_init_packet(self) -> bytes:
-        """Create init packet."""
-        seq = self._get_next_seq()
-        
-        header = b'\x00\x00\x27\x14\x00\x00\x00\x00'
-        zero16 = b'\x00' * 16
-        zero16_2 = b'\x00' * 16
-        mac_bytes = self._mac_to_bytes()
-        zero16_3 = b'\x00' * 16
-        order_part = b'\x00\x00\x00' + seq.to_bytes(1, 'big')
-        
-        # init(): ff ff 08 00 00 00 00 00 00 73 7b
-        command = b'\xff\xff\x08\x00\x00\x00\x00\x00\x00\x73\x7b'
-        cmd_len = len(command)
-        len_part = b'\x00\x00\x00' + cmd_len.to_bytes(1, 'big')
-        
-        packet = (
-            header + 
-            zero16 + 
-            zero16_2 + 
-            mac_bytes +
-            zero16_3 +
-            order_part +
-            len_part +
-            command
-        )
-        
-        return packet
-    
-    def create_on_packet(self) -> bytes:
-        """Create power on packet."""
-        seq = self._get_next_seq()
-        
-        header = b'\x00\x00\x27\x14\x00\x00\x00\x00'
-        zero16 = b'\x00' * 16
-        zero16_2 = b'\x00' * 16
-        mac_bytes = self._mac_to_bytes()
-        zero16_3 = b'\x00' * 16
-        order_part = b'\x00\x00\x00' + seq.to_bytes(1, 'big')
-        
-        # on(): ff ff 0a 00 00 00 00 00 00 01 4d 02 5a
-        command = b'\xff\xff\x0a\x00\x00\x00\x00\x00\x00\x01\x4d\x02\x5a'
-        cmd_len = len(command)
-        len_part = b'\x00\x00\x00' + cmd_len.to_bytes(1, 'big')
-        
-        packet = (
-            header + 
-            zero16 + 
-            zero16_2 + 
-            mac_bytes +
-            zero16_3 +
-            order_part +
-            len_part +
-            command
-        )
-        
-        return packet
-    
-    def create_off_packet(self) -> bytes:
-        """Create power off packet."""
-        seq = self._get_next_seq()
-        
-        header = b'\x00\x00\x27\x14\x00\x00\x00\x00'
-        zero16 = b'\x00' * 16
-        zero16_2 = b'\x00' * 16
-        mac_bytes = self._mac_to_bytes()
-        zero16_3 = b'\x00' * 16
-        order_part = b'\x00\x00\x00' + seq.to_bytes(1, 'big')
-        
-        # off(): ff ff 0a 00 00 00 00 00 00 01 4d 03 5b
-        command = b'\xff\xff\x0a\x00\x00\x00\x00\x00\x00\x01\x4d\x03\x5b'
-        cmd_len = len(command)
-        len_part = b'\x00\x00\x00' + cmd_len.to_bytes(1, 'big')
-        
-        packet = (
-            header + 
-            zero16 + 
-            zero16_2 + 
-            mac_bytes +
-            zero16_3 +
-            order_part +
-            len_part +
-            command
-        )
-        
-        return packet
-    
-    def create_set_state_packet(self, state: State) -> bytes:
-        """Create set state packet."""
-        seq = self._get_next_seq()
-        
-        header = b'\x00\x00\x27\x14\x00\x00\x00\x00'
-        zero16 = b'\x00' * 16
-        zero16_2 = b'\x00' * 16
-        mac_bytes = self._mac_to_bytes()
-        zero16_3 = b'\x00' * 16
-        order_part = b'\x00\x00\x00' + seq.to_bytes(1, 'big')
-        
-        # Build command according to setState() in raw-commands.ts
-        # Start with: ff ff 22 00 00 00 00 00 00 01 4d 5f 00 00 00 00 00 00 00 00 00 00
-        command = bytearray([
-            0xff, 0xff, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x01, 0x4d, 0x5f, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+        """Create initialization packet."""
+        # Based on observed data: init command is 0x08 with specific data
+        # Data from original: 0x00 0x00 0x00 0x00 0x00 0x73 0x7B
+        init_data = bytes([
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x73, 0x7B
         ])
+        return self._build_frame(CMD_TYPE_INIT, init_data)
+    
+    def create_status_request_packet(self) -> bytes:
+        """Create status request packet."""
+        # Simple status request - may need MAC address in data
+        mac_bytes = bytes.fromhex(self.mac)
+        status_data = mac_bytes + b'\x00\x00\x00\x00'  # MAC + padding
+        return self._build_frame(CMD_TYPE_STATUS_REQUEST, status_data)
+    
+    def create_control_packet(self, state: State) -> bytes:
+        """Create control packet to change device state."""
+        # Build control data based on state
+        # This needs to be determined experimentally
+        control_data = bytearray()
         
-        # Add mode: 00 0{mode}
-        command.extend([0x00, state.mode])
+        # Start with some header
+        control_data.extend([0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x4D, 0x5F])
+        control_data.extend([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        control_data.extend([0x00, 0x00])  # More zeros
         
-        # Add fan speed: 00 0{fanSpeed}
-        command.extend([0x00, state.fan_speed])
+        # Add mode
+        control_data.extend([0x00, state.mode])
         
-        # Add limits: 00 0{limits}
-        command.extend([0x00, state.limits])
+        # Add fan speed
+        control_data.extend([0x00, state.fan_speed])
         
-        # Add power: 00 0{Number(state.health) ? 9 : 1}
-        power_byte = 0x09 if state.health else 0x01
-        command.extend([0x00, power_byte])
+        # Add swing mode
+        control_data.extend([0x00, state.limits])
         
-        # Add health: 00 0{Number(state.health)}
+        # Add power (special encoding)
+        power_byte = 0x09 if state.power else 0x01
+        control_data.extend([0x00, power_byte])
+        
+        # Add health mode
         health_byte = 0x01 if state.health else 0x00
-        command.extend([0x00, health_byte])
+        control_data.extend([0x00, health_byte])
         
-        # Add zeros: 00 00
-        command.extend([0x00, 0x00])
+        # Add zeros
+        control_data.extend([0x00, 0x00])
         
-        # Add target temperature: 00 0{(targetTemperature - 16).toString(16)}
-        temp_offset = state.target_temperature - 16
-        if temp_offset < 0 or temp_offset > 15:
-            raise ValueError(f"Target temperature out of range: {state.target_temperature}")
-        command.extend([0x00, temp_offset])
+        # Add target temperature (offset by 16)
+        temp_offset = max(0, min(15, state.target_temperature - 16))
+        control_data.extend([0x00, temp_offset])
         
-        # Calculate checksum
-        checksum = self._calculate_checksum(bytes(command))
-        command.append(checksum)
-        
-        cmd_len = len(command)
-        len_part = b'\x00\x00\x00' + cmd_len.to_bytes(1, 'big')
-        
-        packet = (
-            header + 
-            zero16 + 
-            zero16_2 + 
-            mac_bytes +
-            zero16_3 +
-            order_part +
-            len_part +
-            bytes(command)
-        )
-        
-        return packet
+        return self._build_frame(CMD_TYPE_CONTROL, bytes(control_data))
     
     def parse_response(self, data: bytes) -> List[Dict[str, Any]]:
-        """Parse response from device using simplified logic."""
-        results = []
-        
-        if len(data) < 4:
-            return results
-        
+        """Parse response frames from device."""
+        frames = []
         i = 0
+        
         while i < len(data):
-            # Look for response packet marker: 00 00 27 15
-            if i + 4 <= len(data) and data[i:i+4] == b'\x00\x00\x27\x15':
-                # Try to parse this packet
-                result = self._parse_packet_simple(data[i:])
-                if result:
-                    results.append(result)
-                    # Skip ahead
-                    i += result.get('packet_length', 100)
-                    continue
-            i += 1
+            # Look for frame separator
+            if i + 2 <= len(data) and data[i:i+2] == FRAME_SEPARATOR:
+                # Try to parse this frame
+                frame = self._parse_frame(data[i:])
+                if frame:
+                    frames.append(frame)
+                    i += frame.get('frame_length', 2)
+                else:
+                    i += 1
+            else:
+                i += 1
         
-        return results
+        return frames
     
-    def _parse_packet_simple(self, data: bytes) -> Optional[Dict[str, Any]]:
-        """Simplified packet parser based on the logs."""
-        if len(data) < 100:
+    def _parse_frame(self, data: bytes) -> Optional[Dict[str, Any]]:
+        """Parse a single frame starting at the beginning of data."""
+        if len(data) < 12:  # Minimum frame size
             return None
         
-        try:
-            # Response packet structure:
-            # 0-3: 00 00 27 15 (response marker)
-            # 4-19: 16 zero bytes
-            # 20-35: 16 zero bytes
-            # 36-51: 16 zero bytes
-            # 52-67: MAC address (12 chars + 4 zeros)
-            # 68-83: 16 zero bytes
-            # 84-90: sequence and length section
-            #   87: sequence number
-            #   90: command length
-            # 91+: command data
-            
-            if data[0:4] != b'\x00\x00\x27\x15':
-                return None
-            
-            # Extract MAC address (bytes 52-63)
-            mac_bytes = data[52:64]
-            mac = mac_bytes.decode('ascii', errors='ignore')
-            
-            # Extract sequence number (byte 87)
-            seq = data[87]
-            
-            # Extract command length (byte 90)
-            cmd_len = data[90]
-            
-            if cmd_len == 0 or 91 + cmd_len > len(data):
-                return None
-            
-            # Extract command data
-            command = data[91:91+cmd_len]
-            
-            # Parse command type
-            cmd_type = None
-            state_data = None
-            
-            if len(command) >= 3:
-                # Check command type
-                if command[0] == 0xff and command[1] == 0xff:
-                    cmd_type = command[2]  # Command type byte
+        # Check separator
+        if data[0:2] != FRAME_SEPARATOR:
+            return None
+        
+        # Get length
+        length = data[2]
+        
+        # Check if we have enough data
+        if len(data) < length + 2:  # +2 for separator
+            return None
+        
+        # Extract frame data (without separator)
+        frame_data = data[2:2+length]
+        
+        # Parse frame components
+        flags = frame_data[1]
+        reserved = frame_data[2:7]
+        frame_type = frame_data[7]
+        
+        # Data starts at position 8
+        data_start = 8
+        checksum_pos = length - 1
+        if flags & FRAME_FLAG_WITH_CRC:
+            checksum_pos -= 2  # Account for CRC
+        
+        frame_data_bytes = frame_data[data_start:checksum_pos]
+        checksum = frame_data[checksum_pos]
+        
+        # Verify checksum
+        calculated_checksum = sum(frame_data[:checksum_pos]) & 0xFF
+        if calculated_checksum != checksum:
+            _LOGGER.debug(f"Checksum mismatch: {calculated_checksum} != {checksum}")
+            return None
+        
+        # Parse frame data based on type
+        parsed_data = self._parse_frame_data(frame_type, frame_data_bytes)
+        
+        return {
+            'frame_length': length + 2,
+            'flags': flags,
+            'type': frame_type,
+            'data': parsed_data,
+            'raw_data': frame_data_bytes
+        }
+    
+    def _parse_frame_data(self, frame_type: int, data: bytes) -> Dict[str, Any]:
+        """Parse frame data based on frame type."""
+        result = {}
+        
+        if frame_type == CMD_TYPE_STATUS_RESPONSE:
+            # Parse status response
+            if len(data) >= 44:
+                try:
+                    # Parse temperatures (might be in different positions)
+                    result['current_temperature'] = data[12] if len(data) > 12 else 21
+                    result['target_temperature'] = (data[42] + 16) if len(data) > 42 else 21
                     
-                    # Try to parse state if it's a state command
-                    if cmd_type == 0x22 and len(command) >= 44:
-                        state_data = self._parse_state_command_simple(command)
-            
-            return {
-                'seq': seq,
-                'mac': mac,
-                'command_type': cmd_type,
-                'state': state_data,
-                'packet_length': 91 + cmd_len
-            }
-            
-        except Exception as ex:
-            _LOGGER.debug(f"Failed to parse packet: {ex}")
-            return None
-    
-    def _parse_state_command_simple(self, command: bytes) -> Optional[State]:
-        """Parse state command (0x22 type) with simplified logic."""
-        try:
-            state = State()
-            
-            # Parse based on structure from parsers.ts
-            # Assuming state data starts at byte 12 (0-indexed)
-            
-            # Current temperature (bytes 12-13, 16-bit big endian)
-            if len(command) >= 14:
-                state.current_temperature = struct.unpack_from('>H', command, 12)[0]
-            
-            # Mode (bytes 30-31)
-            if len(command) >= 32:
-                state.mode = struct.unpack_from('>H', command, 30)[0]
-            
-            # Fan speed (bytes 32-33)
-            if len(command) >= 34:
-                state.fan_speed = struct.unpack_from('>H', command, 32)[0]
-            
-            # Limits (bytes 34-35)
-            if len(command) >= 36:
-                state.limits = struct.unpack_from('>H', command, 34)[0]
-            
-            # Power (bytes 36-37)
-            if len(command) >= 38:
-                power_val = struct.unpack_from('>H', command, 36)[0]
-                state.power = bool(power_val % 2)
-            
-            # Health (bytes 38-39)
-            if len(command) >= 40:
-                health_val = struct.unpack_from('>H', command, 38)[0]
-                state.health = bool(health_val % 2)
-            
-            # Target temperature (bytes 42-43, needs +16)
-            if len(command) >= 44:
-                temp_offset = struct.unpack_from('>H', command, 42)[0]
-                state.target_temperature = temp_offset + 16
-            
-            return state
-            
-        except Exception as ex:
-            _LOGGER.debug(f"Failed to parse state: {ex}")
-            return None
+                    # Parse mode and fan
+                    if len(data) > 30:
+                        result['mode'] = data[30]
+                    if len(data) > 32:
+                        result['fan_speed'] = data[32]
+                    
+                    # Parse flags
+                    if len(data) > 34:
+                        result['limits'] = data[34]
+                    if len(data) > 36:
+                        result['power'] = bool(data[36] & 0x01)
+                    if len(data) > 38:
+                        result['health'] = bool(data[38] & 0x01)
+                        
+                except (IndexError, ValueError) as e:
+                    _LOGGER.debug(f"Error parsing status: {e}")
+        
+        elif frame_type == CMD_TYPE_ACK:
+            # Acknowledgement frame
+            result['acknowledged'] = True
+            if data:
+                result['seq'] = data[0] if len(data) > 0 else 0
+        
+        return result
