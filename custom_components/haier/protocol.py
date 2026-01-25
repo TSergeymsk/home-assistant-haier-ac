@@ -67,20 +67,13 @@ class HaierProtocol:
         mac_bytes = self.mac.encode('ascii')
         return mac_bytes + b'\x00' * 4
     
-    def _checksum(self, data: bytes) -> int:
+    def _calculate_checksum(self, data: bytes) -> int:
         """Calculate checksum for command data."""
         # From raw-commands.ts: appendChecksum function
-        # Sum of hex digits with alternating weights 16 and 1
-        hex_str = data.hex()
-        total = 0
-        for i, char in enumerate(hex_str):
-            value = int(char, 16)
-            if i % 2 == 0:  # even position (0-indexed)
-                total += value * 16
-            else:  # odd position
-                total += value
-        checksum = total - 2 * 255
-        return checksum & 0xFF
+        # Simple sum of bytes
+        total = sum(data)
+        checksum = total & 0xFF
+        return checksum
     
     def create_hello_packet(self) -> bytes:
         """Create hello packet (before init)."""
@@ -106,7 +99,8 @@ class HaierProtocol:
         order_part = b'\x00\x00\x00' + order_byte
         
         # Command length and command
-        command = b'\xff\xff\x0a\x00\x00\x00\x00\x00\x00\x01\x4d\x01\x59'  # hello()
+        # hello(): ff ff 0a 00 00 00 00 00 00 01 4d 01 59
+        command = b'\xff\xff\x0a\x00\x00\x00\x00\x00\x00\x01\x4d\x01\x59'
         cmd_len = len(command)
         len_part = b'\x00\x00\x00' + cmd_len.to_bytes(1, 'big')
         
@@ -135,7 +129,8 @@ class HaierProtocol:
         zero16_3 = b'\x00' * 16
         order_part = b'\x00\x00\x00' + seq.to_bytes(1, 'big')
         
-        command = b'\xff\xff\x08\x00\x00\x00\x00\x00\x00\x73\x7b'  # init()
+        # init(): ff ff 08 00 00 00 00 00 00 73 7b
+        command = b'\xff\xff\x08\x00\x00\x00\x00\x00\x00\x73\x7b'
         cmd_len = len(command)
         len_part = b'\x00\x00\x00' + cmd_len.to_bytes(1, 'big')
         
@@ -163,7 +158,8 @@ class HaierProtocol:
         zero16_3 = b'\x00' * 16
         order_part = b'\x00\x00\x00' + seq.to_bytes(1, 'big')
         
-        command = b'\xff\xff\x0a\x00\x00\x00\x00\x00\x00\x01\x4d\x02\x5a'  # on()
+        # on(): ff ff 0a 00 00 00 00 00 00 01 4d 02 5a
+        command = b'\xff\xff\x0a\x00\x00\x00\x00\x00\x00\x01\x4d\x02\x5a'
         cmd_len = len(command)
         len_part = b'\x00\x00\x00' + cmd_len.to_bytes(1, 'big')
         
@@ -191,7 +187,8 @@ class HaierProtocol:
         zero16_3 = b'\x00' * 16
         order_part = b'\x00\x00\x00' + seq.to_bytes(1, 'big')
         
-        command = b'\xff\xff\x0a\x00\x00\x00\x00\x00\x00\x01\x4d\x03\x5b'  # off()
+        # off(): ff ff 0a 00 00 00 00 00 00 01 4d 03 5b
+        command = b'\xff\xff\x0a\x00\x00\x00\x00\x00\x00\x01\x4d\x03\x5b'
         cmd_len = len(command)
         len_part = b'\x00\x00\x00' + cmd_len.to_bytes(1, 'big')
         
@@ -254,7 +251,7 @@ class HaierProtocol:
         command.extend([0x00, temp_offset])
         
         # Calculate checksum
-        checksum = self._checksum(bytes(command))
+        checksum = self._calculate_checksum(bytes(command))
         command.append(checksum)
         
         cmd_len = len(command)
@@ -274,7 +271,7 @@ class HaierProtocol:
         return packet
     
     def parse_response(self, data: bytes) -> List[Dict[str, Any]]:
-        """Parse response from device using the same logic as TheParser."""
+        """Parse response from device using simplified logic."""
         results = []
         
         if len(data) < 4:
@@ -282,132 +279,122 @@ class HaierProtocol:
         
         i = 0
         while i < len(data):
-            # Look for start of packet: 00 00 27 15 (response)
-            if i + 4 <= len(data) and data[i:i+2] == b'\x00\x00' and data[i+2] == 0x27 and data[i+3] == 0x15:
-                # This is a response packet
-                try:
-                    result = self._parse_packet(data, i)
-                    if result:
-                        results.append(result)
-                        # Move i to end of this packet
-                        i = result.get('end_index', i + 1)
-                        continue
-                except Exception as e:
-                    _LOGGER.debug(f"Failed to parse packet at index {i}: {e}")
-            
+            # Look for response packet marker: 00 00 27 15
+            if i + 4 <= len(data) and data[i:i+4] == b'\x00\x00\x27\x15':
+                # Try to parse this packet
+                result = self._parse_packet_simple(data[i:])
+                if result:
+                    results.append(result)
+                    # Skip ahead
+                    i += result.get('packet_length', 100)
+                    continue
             i += 1
         
         return results
     
-    def _parse_packet(self, data: bytes, start_idx: int) -> Optional[Dict[str, Any]]:
-        """Parse a single packet starting at start_idx."""
-        idx = start_idx
-        
-        # Minimum packet size check
-        if len(data) - idx < 100:  # Rough estimate
+    def _parse_packet_simple(self, data: bytes) -> Optional[Dict[str, Any]]:
+        """Simplified packet parser based on the logs."""
+        if len(data) < 100:
             return None
         
-        # Skip header (00 00 27 15 00 00 00 00)
-        idx += 8
-        
-        # Skip 16 zero bytes (res_start_zero4)
-        idx += 16
-        
-        # Skip another 16 zero bytes (first_zero)
-        idx += 16
-        
-        # Skip another 16 zero bytes (second_zero)
-        idx += 16
-        
-        # MAC address (12 chars + 4 zeros)
-        mac_bytes = data[idx:idx+16]
-        mac_ascii = mac_bytes[:12].decode('ascii', errors='ignore')
-        idx += 16
-        
-        # Skip 16 zero bytes (third_zero)
-        idx += 16
-        
-        # Scan command length section (7 bytes)
-        if idx + 7 > len(data):
-            return None
+        try:
+            # Response packet structure:
+            # 0-3: 00 00 27 15 (response marker)
+            # 4-19: 16 zero bytes
+            # 20-35: 16 zero bytes
+            # 36-51: 16 zero bytes
+            # 52-67: MAC address (12 chars + 4 zeros)
+            # 68-83: 16 zero bytes
+            # 84-90: sequence and length section
+            #   87: sequence number
+            #   90: command length
+            # 91+: command data
             
-        # Byte 3 of this section is sequence number
-        seq = data[idx + 3]
-        
-        # Byte 7 is command length
-        cmd_len = data[idx + 6]
-        idx += 7
-        
-        # Command data
-        if idx + cmd_len > len(data):
-            return None
+            if data[0:4] != b'\x00\x00\x27\x15':
+                return None
             
-        command = data[idx:idx+cmd_len]
-        idx += cmd_len
-        
-        # Parse command if it's a state command (0x22)
-        if cmd_len >= 3 and command[0] == 0xff and command[1] == 0xff and command[2] == 0x22:
-            state = self._parse_state_command(command)
+            # Extract MAC address (bytes 52-63)
+            mac_bytes = data[52:64]
+            mac = mac_bytes.decode('ascii', errors='ignore')
+            
+            # Extract sequence number (byte 87)
+            seq = data[87]
+            
+            # Extract command length (byte 90)
+            cmd_len = data[90]
+            
+            if cmd_len == 0 or 91 + cmd_len > len(data):
+                return None
+            
+            # Extract command data
+            command = data[91:91+cmd_len]
+            
+            # Parse command type
+            cmd_type = None
+            state_data = None
+            
+            if len(command) >= 3:
+                # Check command type
+                if command[0] == 0xff and command[1] == 0xff:
+                    cmd_type = command[2]  # Command type byte
+                    
+                    # Try to parse state if it's a state command
+                    if cmd_type == 0x22 and len(command) >= 44:
+                        state_data = self._parse_state_command_simple(command)
+            
             return {
-                'type': PayloadType.RESPONSE,
                 'seq': seq,
-                'mac': mac_ascii,
-                'command_type': CommandType.STATE,
-                'state': state,
-                'end_index': idx
+                'mac': mac,
+                'command_type': cmd_type,
+                'state': state_data,
+                'packet_length': 91 + cmd_len
             }
-        
-        return {
-            'type': PayloadType.RESPONSE,
-            'seq': seq,
-            'mac': mac_ascii,
-            'command_type': command[2] if len(command) > 2 else None,
-            'end_index': idx
-        }
+            
+        except Exception as ex:
+            _LOGGER.debug(f"Failed to parse packet: {ex}")
+            return None
     
-    def _parse_state_command(self, command: bytes) -> State:
-        """Parse state command (0x22 type)."""
-        if len(command) < 40:
-            raise ValueError("State command too short")
-        
-        # Parse according to stateParser in parsers.ts
-        # Skip to position where state data starts (after 0x22 command header)
-        
-        # In parsers.ts, stateParser starts at byte 22 (0-indexed) of the command
-        # But looking at setState, the actual state data starts earlier
-        
-        # Simpler approach: extract known positions
-        state = State()
-        
-        # Current temperature is at position 12-13 (16-bit big endian)
-        if len(command) >= 14:
-            state.current_temperature = struct.unpack_from('>H', command, 12)[0]
-        
-        # Mode at position 30-31
-        if len(command) >= 32:
-            state.mode = struct.unpack_from('>H', command, 30)[0]
-        
-        # Fan speed at position 32-33
-        if len(command) >= 34:
-            state.fan_speed = struct.unpack_from('>H', command, 32)[0]
-        
-        # Limits at position 34-35
-        if len(command) >= 36:
-            state.limits = struct.unpack_from('>H', command, 34)[0]
-        
-        # Power at position 36-37
-        if len(command) >= 38:
-            power_val = struct.unpack_from('>H', command, 36)[0]
-            state.power = bool(power_val % 2)
-        
-        # Health at position 38-39
-        if len(command) >= 40:
-            health_val = struct.unpack_from('>H', command, 38)[0]
-            state.health = bool(health_val % 2)
-        
-        # Target temperature at position 42-43 (but needs +16)
-        if len(command) >= 44:
-            temp_offset = struct.unpack_from('>H', command, 42)[0]
-            state.target_temperature = temp_offset + 16
-        
-        return state
+    def _parse_state_command_simple(self, command: bytes) -> Optional[State]:
+        """Parse state command (0x22 type) with simplified logic."""
+        try:
+            state = State()
+            
+            # Parse based on structure from parsers.ts
+            # Assuming state data starts at byte 12 (0-indexed)
+            
+            # Current temperature (bytes 12-13, 16-bit big endian)
+            if len(command) >= 14:
+                state.current_temperature = struct.unpack_from('>H', command, 12)[0]
+            
+            # Mode (bytes 30-31)
+            if len(command) >= 32:
+                state.mode = struct.unpack_from('>H', command, 30)[0]
+            
+            # Fan speed (bytes 32-33)
+            if len(command) >= 34:
+                state.fan_speed = struct.unpack_from('>H', command, 32)[0]
+            
+            # Limits (bytes 34-35)
+            if len(command) >= 36:
+                state.limits = struct.unpack_from('>H', command, 34)[0]
+            
+            # Power (bytes 36-37)
+            if len(command) >= 38:
+                power_val = struct.unpack_from('>H', command, 36)[0]
+                state.power = bool(power_val % 2)
+            
+            # Health (bytes 38-39)
+            if len(command) >= 40:
+                health_val = struct.unpack_from('>H', command, 38)[0]
+                state.health = bool(health_val % 2)
+            
+            # Target temperature (bytes 42-43, needs +16)
+            if len(command) >= 44:
+                temp_offset = struct.unpack_from('>H', command, 42)[0]
+                state.target_temperature = temp_offset + 16
+            
+            return state
+            
+        except Exception as ex:
+            _LOGGER.debug(f"Failed to parse state: {ex}")
+            return None

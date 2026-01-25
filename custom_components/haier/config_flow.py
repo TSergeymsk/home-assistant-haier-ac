@@ -25,7 +25,7 @@ STEP_USER_DATA_SCHEMA = vol.Schema({
     vol.Required(CONF_NAME, default=DEFAULT_NAME): str,
     vol.Required(CONF_HEALTH_MODE, default=False, description="Enable Health Mode feature"): bool,
     vol.Optional(CONF_HEALTH_MODE_TYPE, default="switch", description="How to control Health Mode"): vol.In(HEALTH_MODE_TYPES),
-    vol.Optional("timeout", default=5000, description="Connection timeout in milliseconds (5000-10000)"): vol.All(vol.Coerce(int), vol.Range(min=1000, max=15000)),
+    vol.Optional("timeout", default=5000, description="Connection timeout in milliseconds"): vol.All(vol.Coerce(int), vol.Range(min=1000, max=15000)),
 })
 
 
@@ -37,8 +37,8 @@ class HaierConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     def __init__(self):
         """Initialize the config flow."""
-        self._errors = {}
         self._test_ip = None
+        self._test_mac = None
 
     async def async_step_user(self, user_input: Optional[Dict[str, Any]] = None):
         """Handle the initial step."""
@@ -56,6 +56,7 @@ class HaierConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 # Format MAC address consistently
                 formatted_mac = ':'.join(mac[i:i+2] for i in range(0, 12, 2))
+                self._test_mac = formatted_mac
                 user_input[CONF_MAC] = formatted_mac
                 
                 # Test connection to device
@@ -90,17 +91,9 @@ class HaierConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             f"Please ensure the device is powered on and connected to the network."
                         )
                         
-                        # Add diagnostic info to error
-                        errors["details"] = f"Failed to connect to {user_input[CONF_IP_ADDRESS]}:56800. "
-                        errors["details"] += "Please verify:\n"
-                        errors["details"] += "1. The device is powered on\n"
-                        errors["details"] += "2. The IP address is correct\n"
-                        errors["details"] += "3. Port 56800 is not blocked by firewall"
-                        
                 except Exception as ex:
                     _LOGGER.error(f"Connection test exception: {ex}")
                     errors["base"] = "cannot_connect"
-                    errors["details"] = f"Exception: {str(ex)}"
         
         # Build schema with current values if available
         schema = self.build_schema(user_input if user_input else {})
@@ -113,7 +106,7 @@ class HaierConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "ip_example": "192.168.4.68",
                 "mac_example": "18:A7:F1:2C:F3:9B",
                 "note": "Note: Device must be powered on and connected to your local network. "
-                       "Default port 56800 will be used."
+                       "Port 56800 will be used for communication."
             }
         )
 
@@ -145,26 +138,6 @@ class HaierConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 default=data.get("timeout", 5000)
             ): vol.All(vol.Coerce(int), vol.Range(min=1000, max=15000)),
         })
-
-    async def async_step_diagnostics(self, user_input=None):
-        """Show diagnostic information."""
-        if user_input is not None:
-            return await self.async_step_user()
-        
-        diagnostic_info = ""
-        if self._test_ip:
-            diagnostic_info = f"Last tested IP: {self._test_ip}\n"
-            diagnostic_info += f"Tested port: 56800\n"
-            diagnostic_info += "To diagnose further:\n"
-            diagnostic_info += "1. Check if device responds to ping\n"
-            diagnostic_info += "2. Verify no firewall is blocking port 56800\n"
-            diagnostic_info += "3. Ensure device is not in sleep mode"
-        
-        return self.async_show_form(
-            step_id="diagnostics",
-            data_schema=vol.Schema({}),
-            description_placeholders={"diagnostic_info": diagnostic_info}
-        )
 
     @staticmethod
     @callback

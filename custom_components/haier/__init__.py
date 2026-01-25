@@ -37,13 +37,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await device.async_connect()
     except Exception as ex:
         _LOGGER.error(f"Failed to connect to device during setup: {ex}")
-        # Try again in a moment
-        await asyncio.sleep(1)
-        try:
-            await device.async_connect()
-        except Exception as ex2:
-            _LOGGER.error(f"Second connection attempt failed: {ex2}")
-            raise ConfigEntryNotReady(f"Could not connect to device: {ex2}") from ex2
+        # Don't raise ConfigEntryNotReady immediately, try to continue
+        # The device might become available later
     
     # Store device in hass.data
     hass.data.setdefault(DOMAIN, {})
@@ -67,7 +62,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Setup update listener
     entry.async_on_unload(entry.add_update_listener(update_listener))
     
-    _LOGGER.info(f"Haier AC {device.name} setup completed successfully")
+    _LOGGER.info(f"Haier AC {device.name} setup completed")
     return True
 
 

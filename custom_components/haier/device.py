@@ -4,6 +4,7 @@ import logging
 import socket
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
+import async_timeout
 
 from .protocol import HaierProtocol, State, FanSpeed, Mode, Limits
 
@@ -58,11 +59,10 @@ class HaierDevice:
         self._last_update = None
         self._update_interval = timedelta(seconds=30)
         
-        # Response buffer
-        self._response_buffer = bytearray()
+        # Response handling
+        self._response_waiter = None
         self._expected_seq = None
-        self._response_event = asyncio.Event()
-        self._last_response = None
+        self._received_responses = {}
         
         _LOGGER.info(f"Initialized Haier device {name} at {ip_address}:{self.port}")
 
@@ -76,15 +76,12 @@ class HaierDevice:
             # Establish TCP connection
             await self._establish_connection()
             
-            # Start listening for responses
-            asyncio.create_task(self._listen_for_responses())
-            
             # Perform handshake: hello -> init
-            await self._send_packet(self.protocol.create_hello_packet())
-            await asyncio.sleep(0.1)
+            await self._send_and_wait(self.protocol.create_hello_packet(), seq=0)
+            await asyncio.sleep(0.5)  # Wait a bit
             
-            await self._send_packet(self.protocol.create_init_packet())
-            await asyncio.sleep(0.1)
+            await self._send_and_wait(self.protocol.create_init_packet(), seq=1)
+            await asyncio.sleep(0.5)  # Wait a bit
             
             # Get initial state
             await self.update()
@@ -104,6 +101,8 @@ class HaierDevice:
                 asyncio.open_connection(self.ip_address, self.port),
                 timeout=self.timeout
             )
+            # Start listening task
+            self._listen_task = asyncio.create_task(self._listen_for_responses())
         except asyncio.TimeoutError:
             raise ConnectionError(f"Connection timeout to {self.ip_address}:{self.port}")
         except Exception as ex:
@@ -117,6 +116,14 @@ class HaierDevice:
 
     async def _close_connection(self):
         """Close TCP connection."""
+        # Cancel listening task
+        if hasattr(self, '_listen_task'):
+            self._listen_task.cancel()
+            try:
+                await self._listen_task
+            except asyncio.CancelledError:
+                pass
+        
         if self._writer:
             try:
                 self._writer.close()
@@ -126,7 +133,7 @@ class HaierDevice:
         self._reader = None
         self._writer = None
 
-    async def _send_packet(self, packet: bytes) -> bool:
+    async def _send_raw_packet(self, packet: bytes):
         """Send raw packet to device."""
         if not self._writer:
             raise ConnectionError("Not connected to device")
@@ -135,117 +142,113 @@ class HaierDevice:
             self._writer.write(packet)
             await self._writer.drain()
             _LOGGER.debug(f"Sent packet of length {len(packet)}")
-            return True
         except Exception as ex:
             _LOGGER.error(f"Failed to send packet: {ex}")
             self._connected = False
             raise
 
+    async def _send_and_wait(self, packet: bytes, seq: int, timeout: float = 2.0):
+        """Send packet and wait for response with given sequence."""
+        # Set up response waiter
+        self._expected_seq = seq
+        response_event = asyncio.Event()
+        self._received_responses[seq] = {'event': response_event, 'data': None}
+        
+        try:
+            # Send packet
+            await self._send_raw_packet(packet)
+            
+            # Wait for response with timeout
+            async with async_timeout.timeout(timeout):
+                await response_event.wait()
+            
+            # Get response data
+            response = self._received_responses[seq]['data']
+            return response
+            
+        except asyncio.TimeoutError:
+            _LOGGER.warning(f"Timeout waiting for response with seq {seq}")
+            return None
+        finally:
+            # Clean up
+            if seq in self._received_responses:
+                del self._received_responses[seq]
+            self._expected_seq = None
+
     async def _listen_for_responses(self):
         """Listen for responses from device."""
-        while self._writer and not self._writer.is_closing():
+        _LOGGER.debug("Starting to listen for responses")
+        
+        while True:
             try:
-                data = await asyncio.wait_for(
-                    self._reader.read(1024),
-                    timeout=self.timeout
-                )
+                if not self._reader:
+                    await asyncio.sleep(0.1)
+                    continue
+                
+                # Read data with timeout
+                try:
+                    async with async_timeout.timeout(1.0):
+                        data = await self._reader.read(4096)
+                except asyncio.TimeoutError:
+                    # Timeout is normal, just continue listening
+                    continue
                 
                 if not data:
                     # Connection closed
+                    _LOGGER.debug("Connection closed by device")
                     break
                 
-                self._response_buffer.extend(data)
+                _LOGGER.debug(f"Received {len(data)} bytes from device")
                 
-                # Parse any complete packets in buffer
-                while self._response_buffer:
-                    parsed = self.protocol.parse_response(bytes(self._response_buffer))
-                    if parsed:
-                        for result in parsed:
-                            _LOGGER.debug(f"Parsed response: seq={result.get('seq')}, type={result.get('command_type')}")
-                            
-                            if 'state' in result:
-                                async with self._state_lock:
-                                    self._state = result['state']
-                                    self._last_update = datetime.now()
-                                    _LOGGER.debug(f"State updated: {self._state}")
-                            
-                            # Signal if this was the expected response
-                            if (self._expected_seq is not None and 
-                                result.get('seq') == self._expected_seq):
-                                self._last_response = result
-                                self._response_event.set()
-                        
-                        # Remove processed data
-                        end_idx = max(r.get('end_index', 0) for r in parsed)
-                        if end_idx > 0 and end_idx <= len(self._response_buffer):
-                            self._response_buffer = self._response_buffer[end_idx:]
-                        else:
-                            # Clear buffer if we can't determine end
-                            self._response_buffer.clear()
-                    else:
-                        # No complete packet yet, wait for more data
-                        break
-                        
-            except asyncio.TimeoutError:
-                # No data received, continue listening
-                continue
-            except Exception as ex:
-                _LOGGER.error(f"Error listening for responses: {ex}")
+                # Parse responses
+                responses = self.protocol.parse_response(data)
+                
+                for response in responses:
+                    seq = response.get('seq')
+                    cmd_type = response.get('command_type')
+                    state = response.get('state')
+                    
+                    _LOGGER.debug(f"Parsed response: seq={seq}, type={cmd_type}")
+                    
+                    # Update state if we got one
+                    if state:
+                        async with self._state_lock:
+                            self._state = state
+                            self._last_update = datetime.now()
+                            _LOGGER.debug(f"State updated: {self._state}")
+                    
+                    # Signal waiter if this is the expected response
+                    if seq is not None and seq in self._received_responses:
+                        self._received_responses[seq]['data'] = response
+                        self._received_responses[seq]['event'].set()
+                
+            except asyncio.CancelledError:
+                _LOGGER.debug("Listening task cancelled")
                 break
+            except Exception as ex:
+                _LOGGER.error(f"Error in listen task: {ex}")
+                await asyncio.sleep(1)  # Avoid tight loop on error
         
         _LOGGER.debug("Stopped listening for responses")
 
-    async def _send_command(self, packet_generator, wait_for_response=True, timeout=2.0):
-        """Send command and optionally wait for response."""
-        if not self._connected:
-            await self.async_connect()
-        
-        # Generate packet (this will increment seq in protocol)
-        packet = packet_generator()
-        
-        # Get expected sequence number (already incremented by protocol)
-        expected_seq = self.protocol.seq - 1
-        
-        if wait_for_response:
-            self._expected_seq = expected_seq
-            self._response_event.clear()
-            self._last_response = None
-        
-        # Send packet
-        await self._send_packet(packet)
-        
-        if wait_for_response:
-            # Wait for response
-            try:
-                await asyncio.wait_for(self._response_event.wait(), timeout=timeout)
-                return self._last_response
-            except asyncio.TimeoutError:
-                _LOGGER.warning(f"Timeout waiting for response to seq {expected_seq}")
-                return None
-            finally:
-                self._expected_seq = None
-        
-        return None
-
     async def update(self):
         """Update device state by requesting current state."""
-        # We can't directly request state, but setState with current values
-        # should return current state
         if not self._connected:
             try:
                 await self.async_connect()
             except Exception:
                 return
         
-        async with self._state_lock:
-            current_state = self._state
-        
         # Send setState with current values to get response
         try:
-            packet = self.protocol.create_set_state_packet(current_state)
-            response = await self._send_command(lambda: packet, wait_for_response=True, timeout=3.0)
+            async with self._state_lock:
+                current_state = self._state
             
-            if response and 'state' in response:
+            # Use sequence number 10 for state requests
+            packet = self.protocol.create_set_state_packet(current_state)
+            response = await self._send_and_wait(packet, seq=10, timeout=3.0)
+            
+            if response and 'state' in response and response['state']:
                 async with self._state_lock:
                     self._state = response['state']
                     self._last_update = datetime.now()
@@ -256,7 +259,8 @@ class HaierDevice:
     # Command methods matching haier-ac-remote API
     async def on(self):
         """Turn device on."""
-        response = await self._send_command(self.protocol.create_on_packet)
+        # Use sequence number 2 for on command
+        response = await self._send_and_wait(self.protocol.create_on_packet(), seq=2)
         if response:
             async with self._state_lock:
                 self._state.power = True
@@ -265,7 +269,8 @@ class HaierDevice:
 
     async def off(self):
         """Turn device off."""
-        response = await self._send_command(self.protocol.create_off_packet)
+        # Use sequence number 3 for off command
+        response = await self._send_and_wait(self.protocol.create_off_packet(), seq=3)
         if response:
             async with self._state_lock:
                 self._state.power = False
@@ -291,11 +296,11 @@ class HaierDevice:
                 await self.on()
                 updated_state.power = True
         
-        # Send setState command
+        # Send setState command with sequence 20
         packet = self.protocol.create_set_state_packet(updated_state)
-        response = await self._send_command(lambda: packet, wait_for_response=True)
+        response = await self._send_and_wait(packet, seq=20, timeout=3.0)
         
-        if response and 'state' in response:
+        if response and 'state' in response and response['state']:
             async with self._state_lock:
                 self._state = response['state']
                 self._last_update = datetime.now()
@@ -326,7 +331,7 @@ class HaierDevice:
         
     @property
     def swing_mode(self):
-        return self._state.limits  # limits maps to swing mode
+        return self._state.limits
         
     @property
     def health_mode(self):
