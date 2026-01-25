@@ -214,39 +214,44 @@ class HaierProtocol:
             # Парсим данные состояния если это команда состояния (0x22)
             state_data = {}
             if cmd_type == 0x22 and len(command) >= 34:
-                # Правильный парсинг на основе анализа TS библиотеки
-                # Текущая температура: байт 15 (0x12 = 18°C)
-                if len(command) > 15:
-                    state_data['current_temperature'] = command[15]
+                # Исправленный парсинг на основе анализа пакетов и TS библиотеки
+                # Команда имеет формат: ff ff 22 00 00 00 00 00 01 06 6d 01 00 1d 00 13 00 7f 00 00 00 00 00 01 00 00 00 00 10 00 00 00 00 08 5f
+                # Парсим как 16 uint16 (32 байта) из command
                 
-                # Целевая температура: байт 13 (0x1d = 29°C)
-                if len(command) > 13:
-                    state_data['target_temperature'] = command[13]
+                # Текущая температура: байты 13-14 (0x00 0x1d = 29°C)
+                if len(command) > 14:
+                    state_data['current_temperature'] = command[13]  # 0x1d = 29
                 
-                # Режим: байт 8
-                if len(command) > 8:
-                    state_data['mode'] = command[8]
+                # Целевая температура: байты 31-32 (0x00 0x08 = 8) + 16 = 24°C
+                if len(command) > 32:
+                    target_temp_raw = command[31]  # 0x08 = 8
+                    state_data['target_temperature'] = target_temp_raw + 16
                 
-                # Скорость вентилятора: байт 17 (0x7f = авто)
-                if len(command) > 17:
-                    fan_speed_raw = command[17]
+                # Режим: байт 21 (0x01 = COOL)
+                if len(command) > 21:
+                    state_data['mode'] = command[21]
+                
+                # Скорость вентилятора: байт 23 (0x00 = AUTO)
+                if len(command) > 23:
+                    fan_speed_raw = command[23]
+                    # Конвертируем как в TS библиотеке
                     if fan_speed_raw == 0x7f:
-                        state_data['fan_speed'] = 0  # авто
+                        state_data['fan_speed'] = 0  # AUTO
                     else:
                         state_data['fan_speed'] = fan_speed_raw
                 
-                # Пределы: байт 20
-                if len(command) > 20:
-                    state_data['limits'] = command[20]
+                # Пределы: байт 25 (0x00 = OFF)
+                if len(command) > 25:
+                    state_data['limits'] = command[25]
                 
-                # Питание: байт 22 (четный=выкл, нечетный=вкл)
-                if len(command) > 22:
-                    power_raw = command[22]
+                # Питание: байт 27 (четный=выкл, нечетный=вкл)
+                if len(command) > 27:
+                    power_raw = command[27]
                     state_data['power'] = bool(power_raw % 2)
                 
-                # Здоровье: байт 24
-                if len(command) > 24:
-                    health_raw = command[24]
+                # Здоровье: байт 29
+                if len(command) > 29:
+                    health_raw = command[29]
                     state_data['health'] = bool(health_raw % 2)
             
             frame_length = pos + cmd_len
