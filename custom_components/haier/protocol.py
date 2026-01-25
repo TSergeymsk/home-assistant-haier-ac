@@ -18,9 +18,9 @@ class Mode(IntEnum):
 
 class FanSpeed(IntEnum):
     AUTO = 0
-    LOW = 1
-    MEDIUM = 2
-    HIGH = 3
+    MIN = 1    # Было LOW
+    MID = 2    # Было MEDIUM
+    MAX = 3    # Было HIGH
 
 class Limits(IntEnum):
     OFF = 0
