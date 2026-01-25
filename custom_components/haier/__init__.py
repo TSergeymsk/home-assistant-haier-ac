@@ -7,7 +7,7 @@ from homeassistant.const import CONF_IP_ADDRESS, CONF_MAC, CONF_NAME
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 
-from .const import DOMAIN, PLATFORMS, CONF_HEALTH_MODE, CONF_HEALTH_MODE_TYPE
+from .const import DOMAIN, PLATFORMS, CONF_HEALTH_MODE, CONF_HEALTH_MODE_TYPE, CONF_TIMEOUT
 from .device import HaierDevice
 
 _LOGGER = logging.getLogger(__name__)
@@ -16,13 +16,18 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Haier AC from a config entry."""
     
+    # Get options with defaults
+    options = entry.options
+    timeout = options.get("timeout", 3000)
+    
     device = HaierDevice(
         hass,
         entry.data[CONF_IP_ADDRESS],
         entry.data[CONF_MAC],
         entry.data[CONF_NAME],
         entry.data.get(CONF_HEALTH_MODE, False),
-        entry.data.get(CONF_HEALTH_MODE_TYPE, "switch")
+        entry.data.get(CONF_HEALTH_MODE_TYPE, "switch"),
+        timeout
     )
     
     try:
