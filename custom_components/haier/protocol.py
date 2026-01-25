@@ -8,7 +8,6 @@ from enum import IntEnum
 
 _LOGGER = logging.getLogger(__name__)
 
-# Добавленные enum - которые отсутствовали
 class Mode(IntEnum):
     AUTO = 0
     COOL = 1
@@ -80,11 +79,12 @@ class HaierProtocol:
         """Build a frame according to actual Haier protocol."""
         # Based on packet analysis: 
         # [separator][length][flags][4-byte reserved][type][data][checksum]
+        # Checksum appears to be simple sum of flags, reserved, type, and data (excluding length)
         
         flags = FRAME_FLAG_WITH_CRC if with_crc else FRAME_FLAG_NO_CRC
         reserved = b'\x00' * 4  # 4 bytes, not 5!
         
-        # Build frame without separator and checksum
+        # Build frame without separator, length, and checksum
         frame_without_extras = bytes([flags]) + reserved + bytes([frame_type]) + data
         
         # Calculate length (includes: flags(1) + reserved(4) + type(1) + data(n) + checksum(1))
@@ -103,8 +103,6 @@ class HaierProtocol:
     
     def create_hello_packet(self) -> bytes:
         """Create hello packet to initiate communication."""
-        # Based on observed data: hello command is 0x0A with specific data
-        # Data from original: 0x00 0x00 0x00 0x00 0x00 0x01 0x4D 0x01 0x59
         hello_data = bytes([
             0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x4D, 0x01, 0x59
         ])
@@ -112,8 +110,6 @@ class HaierProtocol:
     
     def create_init_packet(self) -> bytes:
         """Create initialization packet."""
-        # Based on observed data: init command is 0x08 with specific data
-        # Data from original: 0x00 0x00 0x00 0x00 0x00 0x73 0x7B
         init_data = bytes([
             0x00, 0x00, 0x00, 0x00, 0x00, 0x73, 0x7B
         ])
@@ -129,10 +125,8 @@ class HaierProtocol:
     def create_control_packet(self, state: State) -> bytes:
         """Create control packet to change device state."""
         # Build control data based on state
-        # This needs to be determined experimentally
         control_data = bytearray()
         
-        # Start with some header
         control_data.extend([0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x4D, 0x5F])
         control_data.extend([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
         control_data.extend([0x00, 0x00])  # More zeros
@@ -189,7 +183,7 @@ class HaierProtocol:
     
     def _parse_frame(self, data: bytes) -> Optional[Dict[str, Any]]:
         """Parse a single frame starting at the beginning of data."""
-        if len(data) < 10:  # Minimum frame size: separator(2) + length(1) + flags(1) + reserved(4) + type(1) + checksum(1)
+        if len(data) < 10:
             _LOGGER.debug(f"Data too short: {len(data)} bytes")
             return None
         
@@ -198,77 +192,62 @@ class HaierProtocol:
             _LOGGER.debug(f"Invalid separator: {data[0:2].hex()}")
             return None
         
-        # Get length (including length byte itself, flags, reserved, type, data, checksum)
+        # Get length
         length = data[2]
         _LOGGER.debug(f"Frame length byte: {length} (0x{length:02x})")
         
-        # Check if we have enough data (total frame size = length + 2 for separator)
         total_frame_size = length + 2
         if len(data) < total_frame_size:
             _LOGGER.debug(f"Not enough data: have {len(data)}, need {total_frame_size}")
             return None
         
-        # Extract the complete frame (including separator)
         frame_bytes = data[0:total_frame_size]
-        _LOGGER.debug(f"Full frame ({total_frame_size} bytes): {frame_bytes.hex()}")
         
-        # Frame data starts at position 2 (after separator)
-        frame_data = frame_bytes[2:]
+        # For debugging, continue parsing even if checksum is wrong
+        _LOGGER.debug(f"DEBUG: Parsing frame (temporarily skipping checksum verification)")
         
-        # Parse components based on ACTUAL packet structure
-        # From packets we see: [length][flags][4-byte reserved][frame_type][data...][checksum]
+        # Parse frame anyway to see what data we get
+        frame_data = frame_bytes[2:]  # Skip separator
         
         flags = frame_data[1]
-        _LOGGER.debug(f"Flags: 0x{flags:02x}")
-        
-        # IMPORTANT: Based on packet analysis, reserved bytes are 4 bytes
         reserved_bytes_count = 4
         reserved_start = 2
         reserved_end = reserved_start + reserved_bytes_count
         
         if len(frame_data) < reserved_end:
-            _LOGGER.debug(f"Frame too short for reserved bytes")
             return None
         
         reserved = frame_data[reserved_start:reserved_end]
         frame_type = frame_data[reserved_end]
-        _LOGGER.debug(f"Reserved bytes: {reserved.hex()}, Frame type: 0x{frame_type:02x}")
         
-        # Data starts after frame type
         data_start = reserved_end + 1
-        
-        # Checksum is the last byte before the end
-        # Total frame_data length should be 'length'
-        if len(frame_data) != length:
-            _LOGGER.debug(f"Frame data length mismatch: expected {length}, got {len(frame_data)}")
-            # But let's continue anyway for debugging
-        
         checksum_pos = length - 1
+        
         if checksum_pos < data_start:
-            _LOGGER.debug(f"Invalid checksum position: {checksum_pos} < {data_start}")
             return None
         
         checksum = frame_data[checksum_pos]
-        
-        # Extract actual data (between data_start and checksum)
         frame_data_bytes = frame_data[data_start:checksum_pos] if data_start < checksum_pos else b''
         
-        # Calculate checksum (sum of frame_data bytes EXCLUDING the checksum itself)
-        # This should include: flags, reserved, frame_type, and data
-        bytes_for_checksum = frame_data[1:checksum_pos]  # From flags to before checksum
-        calculated_checksum = sum(bytes_for_checksum) & 0xFF
+        # DEBUG: Try different checksum algorithms
+        bytes_without_checksum = frame_data[1:checksum_pos]  # From flags to before checksum
+        simple_sum = sum(bytes_without_checksum) & 0xFF
+        xor_sum = 0
+        for b in bytes_without_checksum:
+            xor_sum ^= b
         
-        _LOGGER.debug(f"Checksum: expected=0x{checksum:02x}({checksum}), calculated=0x{calculated_checksum:02x}({calculated_checksum})")
-        _LOGGER.debug(f"Bytes for checksum ({len(bytes_for_checksum)}): {bytes_for_checksum.hex()}")
-        _LOGGER.debug(f"Frame data bytes ({len(frame_data_bytes)}): {frame_data_bytes.hex()}")
+        # Also try including the length byte
+        bytes_with_length = frame_data[0:checksum_pos]  # From length to before checksum
+        sum_with_length = sum(bytes_with_length) & 0xFF
         
-        checksum_ok = calculated_checksum == checksum
-        if not checksum_ok:
-            _LOGGER.debug(f"Checksum mismatch: {calculated_checksum} != {checksum}")
-            # For debugging, let's continue anyway
-            # return None
+        _LOGGER.debug(f"DEBUG: Checksum analysis:")
+        _LOGGER.debug(f"  Expected: 0x{checksum:02x} ({checksum})")
+        _LOGGER.debug(f"  Simple sum (without length): 0x{simple_sum:02x} ({simple_sum})")
+        _LOGGER.debug(f"  XOR sum (without length): 0x{xor_sum:02x} ({xor_sum})")
+        _LOGGER.debug(f"  Sum with length: 0x{sum_with_length:02x} ({sum_with_length})")
+        _LOGGER.debug(f"  Bytes for check ({len(bytes_without_checksum)}): {bytes_without_checksum.hex()}")
         
-        # Parse frame data based on type
+        # Parse frame data (skip checksum verification for now)
         parsed_data = self._parse_frame_data(frame_type, frame_data_bytes)
         
         return {
@@ -277,7 +256,9 @@ class HaierProtocol:
             'type': frame_type,
             'data': parsed_data,
             'raw_data': frame_data_bytes,
-            'checksum_ok': checksum_ok
+            'checksum_ok': False,  # Temporarily set to False
+            'checksum_expected': checksum,
+            'checksum_calculated': simple_sum,
         }
     
     def _parse_frame_data(self, frame_type: int, data: bytes) -> Dict[str, Any]:
@@ -286,24 +267,20 @@ class HaierProtocol:
         
         _LOGGER.debug(f"Parsing frame data: type=0x{frame_type:02x}, data={data.hex()}")
         
-        if frame_type == 0x04:  # ACK frame from first packet
-            # Parse acknowledgement frame
-            result['acknowledged'] = True
-            if len(data) >= 2:
-                result['sub_type'] = data[0]
-                result['status'] = data[1]
-                _LOGGER.debug(f"ACK frame: sub_type=0x{data[0]:02x}, status=0x{data[1]:02x}")
+        if frame_type == 0x01:  # First packet type
+            if len(data) >= 1:
+                result['unknown_type_01'] = True
+                result['data'] = data.hex()
+                # Try to interpret as ACK
+                if len(data) >= 2:
+                    result['ack_subtype'] = data[0]
+                    result['ack_status'] = data[1]
         
-        elif frame_type == 0x06:  # Response frame from second packet
+        elif frame_type == 0x06:  # Response frame with device state
             # Parse response frame with device data
-            if len(data) >= 30:
+            if len(data) >= 8:
                 try:
-                    # Based on packet: 6d01001d0013007f0000000000010000000000100000000000085f
-                    # This seems to contain device state information
-                    
-                    # The MAC address appears to be in the first packet, not here
-                    # Let's try to extract some state information
-                    
+                    # Based on packet: 6d01001d0013007f...
                     # Byte 0: 0x6d = 109 (unknown)
                     # Byte 1: 0x01 = 1 (power? mode?)
                     # Byte 2: 0x00 = 0
@@ -342,25 +319,15 @@ class HaierProtocol:
                 except (IndexError, ValueError) as e:
                     _LOGGER.debug(f"Error parsing state frame: {e}")
         
-        elif frame_type == 0x01:  # Some other response type
-            result['unknown_type_01'] = True
-            if len(data) > 0:
-                result['data'] = data.hex()
-        
         return result
     
-    # Add missing methods that are called from device.py
     def create_on_packet(self) -> bytes:
         """Create packet to turn device on."""
-        # This needs proper implementation based on protocol
-        # For now, create a control packet with power=True
         state = State(power=True)
         return self.create_control_packet(state)
     
     def create_off_packet(self) -> bytes:
         """Create packet to turn device off."""
-        # This needs proper implementation based on protocol
-        # For now, create a control packet with power=False
         state = State(power=False)
         return self.create_control_packet(state)
     

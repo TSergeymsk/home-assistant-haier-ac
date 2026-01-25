@@ -46,16 +46,16 @@ HAIER_TO_HA_MODE = {
 # Fan speed mapping
 HA_TO_HAIER_FAN = {
     FAN_AUTO: FanSpeed.AUTO,
-    FAN_LOW: FanSpeed.MIN,
-    FAN_MEDIUM: FanSpeed.MID,
-    FAN_HIGH: FanSpeed.MAX,
+    FAN_LOW: FanSpeed.LOW,
+    FAN_MEDIUM: FanSpeed.MEDIUM,
+    FAN_HIGH: FanSpeed.HIGH,
 }
 
 HAIER_TO_HA_FAN = {
     FanSpeed.AUTO: FAN_AUTO,
-    FanSpeed.MIN: FAN_LOW,
-    FanSpeed.MID: FAN_MEDIUM,
-    FanSpeed.MAX: FAN_HIGH,
+    FanSpeed.LOW: FAN_LOW,
+    FanSpeed.MEDIUM: FAN_MEDIUM,
+    FanSpeed.HIGH: FAN_HIGH,
 }
 
 # Swing mode mapping
