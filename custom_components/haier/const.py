@@ -19,10 +19,12 @@ HEALTH_MODE_TYPES: Final = ["switch", "light"]
 PLATFORMS: Final = ["climate", "switch", "light"]
 
 # Default values
-DEFAULT_TIMEOUT: Final = 3000  # milliseconds
+DEFAULT_TIMEOUT: Final = 5000  # milliseconds
+DEFAULT_PORT: Final = 56800  # Port from your nmap scan
 DEFAULT_SCAN_INTERVAL: Final = 30
 
-# Haier-specific constants
+# Haier-specific constants (based on haier-ac-remote)
+HAIER_MODE_OFF: Final = 0
 HAIER_MODE_AUTO: Final = 1
 HAIER_MODE_COOL: Final = 2
 HAIER_MODE_HEAT: Final = 3
@@ -40,6 +42,7 @@ HAIER_SWING_VERTICAL: Final = 1
 # Services
 SERVICE_SET_FAN_SPEED: Final = "set_fan_speed"
 SERVICE_SET_SWING_MODE: Final = "set_swing_mode"
+SERVICE_REFRESH: Final = "refresh"
 
 # Attributes
 ATTR_INSIDE_TEMPERATURE: Final = "inside_temperature"
@@ -49,3 +52,11 @@ ATTR_FILTER_STATUS: Final = "filter_status"
 ATTR_ENERGY_CONSUMPTION: Final = "energy_consumption"
 ATTR_DEVICE_MAC: Final = "device_mac"
 ATTR_DEVICE_IP: Final = "device_ip"
+ATTR_CONNECTION_STATUS: Final = "connection_status"
+ATTR_LAST_UPDATE: Final = "last_update"
+
+# Error messages
+ERROR_CANNOT_CONNECT: Final = "cannot_connect"
+ERROR_INVALID_MAC: Final = "invalid_mac_format"
+ERROR_TIMEOUT: Final = "timeout"
+ERROR_UNKNOWN: Final = "unknown"

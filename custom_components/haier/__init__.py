@@ -6,8 +6,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_IP_ADDRESS, CONF_MAC, CONF_NAME
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import device_registry as dr
 
-from .const import DOMAIN, PLATFORMS, CONF_HEALTH_MODE, CONF_HEALTH_MODE_TYPE, CONF_TIMEOUT
+from .const import DOMAIN, PLATFORMS, CONF_HEALTH_MODE, CONF_HEALTH_MODE_TYPE
 from .device import HaierDevice
 
 _LOGGER = logging.getLogger(__name__)
@@ -18,8 +19,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     
     # Get options with defaults
     options = entry.options
-    timeout = options.get("timeout", 3000)
+    timeout = options.get("timeout", 5000)
     
+    # Create device instance
     device = HaierDevice(
         hass,
         entry.data[CONF_IP_ADDRESS],
@@ -31,18 +33,41 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     
     try:
+        # Connect to device
         await device.async_connect()
     except Exception as ex:
-        raise ConfigEntryNotReady(f"Could not connect to device: {ex}") from ex
+        _LOGGER.error(f"Failed to connect to device during setup: {ex}")
+        # Try again in a moment
+        await asyncio.sleep(1)
+        try:
+            await device.async_connect()
+        except Exception as ex2:
+            _LOGGER.error(f"Second connection attempt failed: {ex2}")
+            raise ConfigEntryNotReady(f"Could not connect to device: {ex2}") from ex2
     
+    # Store device in hass.data
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = device
+    
+    # Register device in device registry
+    device_registry = dr.async_get(hass)
+    device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, device.mac)},
+        manufacturer="Haier",
+        name=device.name,
+        model="Air Conditioner",
+        sw_version="1.0",
+        configuration_url=f"http://{device.ip_address}",
+    )
     
     # Set up platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     
+    # Setup update listener
     entry.async_on_unload(entry.add_update_listener(update_listener))
     
+    _LOGGER.info(f"Haier AC {device.name} setup completed successfully")
     return True
 
 
@@ -51,12 +76,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     
     if unload_ok:
-        device = hass.data[DOMAIN].pop(entry.entry_id)
-        await device.async_disconnect()
+        device = hass.data[DOMAIN].pop(entry.entry_id, None)
+        if device:
+            await device.async_disconnect()
+        _LOGGER.info(f"Haier AC {entry.data[CONF_NAME]} unloaded")
     
     return unload_ok
 
 
 async def update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Handle options update."""
+    _LOGGER.info(f"Configuration updated for {entry.data[CONF_NAME]}")
     await hass.config_entries.async_reload(entry.entry_id)
