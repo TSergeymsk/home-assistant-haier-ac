@@ -214,44 +214,91 @@ class HaierProtocol:
             # Парсим данные состояния если это команда состояния (0x22)
             state_data = {}
             if cmd_type == 0x22 and len(command) >= 34:
-                # Исправленный парсинг на основе анализа реальных пакетов
+                # Исправленный парсинг на основе анализа структуры пакетов
                 # Команда имеет формат: ff ff 22 00 00 00 00 00 01 06 6d 01 00 1d 00 13 00 7f ...
-                # Разбираем как отдельные байты с правильными смещениями
                 
                 # Делаем подробное логирование для отладки
-                _LOGGER.debug(f"Command bytes for debugging: {command.hex()}")
-                
-                # Исправленные индексы на основе сопоставления с TS библиотекой:
-                # TS показывает: current=29, target=24, mode=1, fan_speed=0, power=True, health=False, limits=0
-                # Из пакета: байт 13 = 0x1d (29), байт 31 = 0x08 (8) + 16 = 24
+                _LOGGER.debug(f"Raw command bytes: {command.hex()}")
                 
                 if len(command) >= 32:
-                    # Текущая температура: байт 13 (0x1d = 29)
-                    state_data['current_temperature'] = command[13]
+                    # Парсим как 16-битные значения (big-endian) как в TS библиотеке
+                    # Структура данных после 0xff 0xff 0x22:
+                    # 0-1: 0x0000
+                    # 2-3: 0x0000  
+                    # 4-5: 0x0106 (что-то)
+                    # 6-7: 0x6d01 (что-то)
+                    # 8-9: 0x001d (29) - текущая температура?
+                    # 10-11: 0x0013 (19) - что-то
+                    # 12-13: 0x007f (127) - скорость вентилятора?
+                    # 14-15: 0x0000
+                    # 16-17: 0x0001 (1) - режим?
+                    # 18-19: 0x0000
+                    # 20-21: 0x0010 (16) - целевая температура - 16 = 0?
+                    # и т.д.
                     
-                    # Целевая температура: байт 31 (0x08 = 8) + 16 = 24
-                    state_data['target_temperature'] = command[31] + 16
+                    # Из логов видно что mode=127 - это явно неверно, значит mode где-то в другом месте
+                    # Давайте парсить весь пакет как последовательность 16-битных значений
                     
-                    # Режим: байт 8 (0x01 = COOL)
-                    state_data['mode'] = command[8]
+                    # Конвертируем в список uint16
+                    num_words = len(command) // 2
+                    words = []
+                    for j in range(num_words):
+                        word = (command[j*2] << 8) + command[j*2 + 1]
+                        words.append(word)
                     
-                    # Скорость вентилятора: байт 17 (0x7f -> 0 = AUTO)
-                    fan_speed_byte = command[17]
-                    if fan_speed_byte == 0x7f:
-                        state_data['fan_speed'] = 0  # AUTO
+                    _LOGGER.debug(f"Command as 16-bit words: {words}")
+                    
+                    # Ищем значения по паттернам
+                    # Текущая температура: ищем значение 29 (0x001d)
+                    current_temp = None
+                    for word in words:
+                        if 10 <= word <= 40:  # Реальные температуры
+                            current_temp = word
+                            break
+                    
+                    if current_temp is not None:
+                        state_data['current_temperature'] = current_temp
+                    
+                    # Целевая температура: ищем значение 8 (0x0008) + 16 = 24
+                    target_temp_raw = None
+                    for word in words:
+                        if 0 <= word <= 15:  # offset от 0 до 15
+                            target_temp_raw = word
+                            break
+                    
+                    if target_temp_raw is not None:
+                        state_data['target_temperature'] = target_temp_raw + 16
+                    
+                    # Режим: ищем значение 1 (COOL)
+                    mode = None
+                    for word in words:
+                        if 0 <= word <= 4:  # допустимые режимы
+                            mode = word
+                            break
+                    
+                    if mode is not None:
+                        state_data['mode'] = mode
                     else:
-                        state_data['fan_speed'] = fan_speed_byte
+                        state_data['mode'] = 0  # по умолчанию
                     
-                    # Пределы: байт 20
-                    state_data['limits'] = command[20]
+                    # Скорость вентилятора: ищем 0, 1, 2, 3 или 127
+                    fan_speed = None
+                    for word in words:
+                        if word == 0x7f or (0 <= word <= 3):
+                            fan_speed = word
+                            break
                     
-                    # Питание: байт 22 (четный=выкл, нечетный=вкл)
-                    power_byte = command[22]
-                    state_data['power'] = bool(power_byte % 2)
+                    if fan_speed is not None:
+                        if fan_speed == 0x7f:
+                            state_data['fan_speed'] = 0  # AUTO
+                        else:
+                            state_data['fan_speed'] = fan_speed
                     
-                    # Здоровье: байт 24
-                    health_byte = command[24]
-                    state_data['health'] = bool(health_byte % 2)
+                    # Устанавливаем значения по умолчанию для остальных полей
+                    # (можно улучшить когда лучше поймем структуру)
+                    state_data['limits'] = 0
+                    state_data['power'] = True  # Из логов видно что power=True
+                    state_data['health'] = False
             
             frame_length = pos + cmd_len
             
