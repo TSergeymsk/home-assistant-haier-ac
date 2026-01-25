@@ -1,0 +1,36 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add Haier Air Conditioner",
+        "description": "Please enter the details of your Haier air conditioner.\n\nExample IP: {ip_example}\nExample MAC: {mac_example}",
+        "data": {
+          "ip_address": "IP Address or Hostname",
+          "mac": "MAC Address",
+          "name": "Name",
+          "health_mode": "Health Mode Enabled",
+          "health_mode_type": "Health Mode Control Type"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the device. Please check the IP address and ensure the device is powered on and connected to the network.",
+      "invalid_mac_format": "Invalid MAC address format. Please use format like AA:BB:CC:DD:EE:FF or AABBCCDDEEFF."
+    },
+    "abort": {
+      "already_configured": "This device is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Haier AC Options",
+        "description": "Configure additional options for your Haier air conditioner.",
+        "data": {
+          "health_mode": "Health Mode Enabled",
+          "health_mode_type": "Health Mode Control Type"
+        }
+      }
+    }
+  }
+}

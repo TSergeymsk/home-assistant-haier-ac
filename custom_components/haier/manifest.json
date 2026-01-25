@@ -1,0 +1,12 @@
+{
+  "domain": "haier",
+  "name": "Haier Air Conditioner",
+  "codeowners": ["@tsergeymsk"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/TSergeymsk/home-assistant-haier-ac",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/TSergeymsk/home-assistant-haier-ac/issues",
+  "requirements": [],
+  "version": "0.0.1"
+}
