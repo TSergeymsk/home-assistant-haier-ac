@@ -357,3 +357,8 @@ class HaierProtocol:
     def create_set_state_packet(self, state: State) -> bytes:
         """Create packet to set device state."""
         return self.create_control_packet(state)
+    
+    def create_ack_response_packet(self, ack_data: bytes = b'\x5a\x00') -> bytes:
+        """Create ACK response packet to acknowledge device messages."""
+        # ACK-пакет типа 0x04 с данными 0x5a00 (возможно, это код подтверждения)
+        return self._build_frame(0x04, ack_data, with_crc=False)

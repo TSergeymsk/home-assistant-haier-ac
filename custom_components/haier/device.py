@@ -181,82 +181,87 @@ class HaierDevice:
                 del self._received_responses[seq]
             self._expected_seq = None
 
-    async def _listen_for_responses(self):
-        """Listen for responses from device."""
-        _LOGGER.debug("Starting to listen for responses")
-        
-        while True:
+async def _listen_for_responses(self):
+    """Listen for responses from device."""
+    _LOGGER.debug("Starting to listen for responses")
+    
+    while True:
+        try:
+            if not self._reader:
+                await asyncio.sleep(0.1)
+                continue
+            
+            # Read data with timeout
             try:
-                if not self._reader:
-                    await asyncio.sleep(0.1)
-                    continue
-                
-                # Read data with timeout
-                try:
-                    async with async_timeout.timeout(1.0):
-                        data = await self._reader.read(4096)
-                except asyncio.TimeoutError:
-                    # Timeout is normal, just continue listening
-                    continue
-                
-                if not data:
-                    # Connection closed
-                    _LOGGER.debug("Connection closed by device")
-                    break
-                
-                _LOGGER.debug(f"Received {len(data)} bytes from device")
-                
-                # Parse responses
-                responses = self.protocol.parse_response(data)
-                
-                for response in responses:
-                    frame_type = response.get('type')
-                    command = response.get('command')
-                    _LOGGER.debug(f"Parsed response: type=0x{frame_type:02x}, command=0x{command:02x}")
-                    
-                    # Update device state if we have state data
-                    if frame_type == 0x06:  # State response
-                        state_data = response.get('data', {})
-                        if state_data:
-                            async with self._state_lock:
-                                # Update device state from parsed data
-                                if 'power' in state_data:
-                                    self._state.power = state_data['power']
-                                if 'mode' in state_data:
-                                    self._state.mode = state_data['mode']
-                                if 'target_temperature' in state_data:
-                                    self._state.target_temperature = state_data['target_temperature']
-                                if 'current_temperature' in state_data:
-                                    self._state.current_temperature = state_data['current_temperature']
-                                if 'fan_speed' in state_data:
-                                    self._state.fan_speed = state_data['fan_speed']
-                                self._last_update = datetime.now()
-                                _LOGGER.debug(f"State updated from response: power={self._state.power}, "
-                                            f"mode={self._state.mode}, target_temp={self._state.target_temperature}, "
-                                            f"current_temp={self._state.current_temperature}, fan_speed={self._state.fan_speed}")
-                    
-                    # Also handle ACK frames (0x04)
-                    elif frame_type == 0x04:  # ACK frame
-                        _LOGGER.debug(f"Received ACK frame")
-                        state_data = response.get('data', {})
-                        if state_data:
-                            _LOGGER.debug(f"ACK data: {state_data}")
-                    
-                    # Signal waiter if this is the expected response
-                    # Note: We don't have seq in responses from device yet, so we'll signal any response
-                    if self._expected_seq is not None:
-                        if self._expected_seq in self._received_responses:
-                            self._received_responses[self._expected_seq]['data'] = response
-                            self._received_responses[self._expected_seq]['event'].set()
-                            _LOGGER.debug(f"Signaled waiter for seq {self._expected_seq}")
-                
-            except asyncio.CancelledError:
-                _LOGGER.debug("Listening task cancelled")
+                async with async_timeout.timeout(1.0):
+                    data = await self._reader.read(4096)
+            except asyncio.TimeoutError:
+                # Timeout is normal, just continue listening
+                continue
+            
+            if not data:
+                # Connection closed
+                _LOGGER.debug("Connection closed by device")
                 break
-            except Exception as ex:
-                _LOGGER.error(f"Error in listen task: {ex}")
-                await asyncio.sleep(1)  # Avoid tight loop on error
-        
+            
+            _LOGGER.debug(f"Received {len(data)} bytes from device")
+            
+            # Parse responses
+            responses = self.protocol.parse_response(data)
+            
+            for response in responses:
+                frame_type = response.get('type')
+                command = response.get('command')
+                _LOGGER.debug(f"Parsed response: type=0x{frame_type:02x}, command=0x{command:02x}")
+                
+                # ОТПРАВКА ACK В ОТВЕТ НА ПЕРВЫЙ ПАКЕТ (тип 0x04)
+                if frame_type == 0x04:  # ACK от устройства
+                    _LOGGER.debug(f"Received ACK from device, sending response ACK")
+                    try:
+                        # Создаем и отправляем ответный ACK-пакет
+                        # В данных ACK используем полученный ack_status (0x5a = 90)
+                        ack_data = bytes([0x5a, 0x00])  # Простой ACK-ответ
+                        ack_packet = self.protocol._build_frame(0x04, ack_data, with_crc=False)
+                        await self._send_raw_packet(ack_packet)
+                        _LOGGER.debug(f"Sent ACK response to device: {ack_packet.hex()}")
+                    except Exception as ex:
+                        _LOGGER.error(f"Failed to send ACK response: {ex}")
+                
+                # Update device state if we have state data
+                if frame_type == 0x06:  # State response
+                    state_data = response.get('data', {})
+                    if state_data:
+                        async with self._state_lock:
+                            # Update device state from parsed data
+                            if 'power' in state_data:
+                                self._state.power = state_data['power']
+                            if 'mode' in state_data:
+                                self._state.mode = state_data['mode']
+                            if 'target_temperature' in state_data:
+                                self._state.target_temperature = state_data['target_temperature']
+                            if 'current_temperature' in state_data:
+                                self._state.current_temperature = state_data['current_temperature']
+                            if 'fan_speed' in state_data:
+                                self._state.fan_speed = state_data['fan_speed']
+                            self._last_update = datetime.now()
+                            _LOGGER.debug(f"State updated from response: power={self._state.power}, "
+                                        f"mode={self._state.mode}, target_temp={self._state.target_temperature}, "
+                                        f"current_temp={self._state.current_temperature}, fan_speed={self._state.fan_speed}")
+                
+                # Signal waiter if this is the expected response
+                if self._expected_seq is not None:
+                    if self._expected_seq in self._received_responses:
+                        self._received_responses[self._expected_seq]['data'] = response
+                        self._received_responses[self._expected_seq]['event'].set()
+                        _LOGGER.debug(f"Signaled waiter for seq {self._expected_seq}")
+            
+        except asyncio.CancelledError:
+            _LOGGER.debug("Listening task cancelled")
+            break
+        except Exception as ex:
+            _LOGGER.error(f"Error in listen task: {ex}")
+            await asyncio.sleep(1)  # Avoid tight loop on error
+    
         _LOGGER.debug("Stopped listening for responses")
 
     async def update(self):
