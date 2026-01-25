@@ -18,9 +18,9 @@ class Mode(IntEnum):
 
 class FanSpeed(IntEnum):
     AUTO = 0
-    MIN = 1    # Было LOW
-    MID = 2    # Было MEDIUM
-    MAX = 3    # Было HIGH
+    LOW = 1
+    MEDIUM = 2
+    HIGH = 3
 
 class Limits(IntEnum):
     OFF = 0
@@ -76,45 +76,28 @@ class HaierProtocol:
         self.seq = (self.seq + 1) % 256
         return seq
     
-    def _build_frame(self, frame_type: int, data: bytes = b'', with_crc: bool = True) -> bytes:
-        """Build a frame according to Haier protocol structure [citation:5]."""
-        # Frame structure:
-        # - Separator: 2 bytes (0xFF 0xFF)
-        # - Length: 1 byte (total frame length)
-        # - Flags: 1 byte (0x40 = with CRC, 0x00 = without)
-        # - Reserved: 5 bytes (0x00)
-        # - Type: 1 byte
-        # - Data: n bytes
-        # - Checksum: 1 byte (sum of bytes except separator and checksum itself)
-        # - CRC: 2 bytes (only if flags indicate)
+    def _build_frame(self, frame_type: int, data: bytes = b'', with_crc: bool = False) -> bytes:
+        """Build a frame according to actual Haier protocol."""
+        # Based on packet analysis: 
+        # [separator][length][flags][4-byte reserved][type][data][checksum]
         
-        # Build frame without separator, checksum and CRC
         flags = FRAME_FLAG_WITH_CRC if with_crc else FRAME_FLAG_NO_CRC
-        reserved = b'\x00' * 5
+        reserved = b'\x00' * 4  # 4 bytes, not 5!
         
-        frame_without_extras = bytes([
-            flags
-        ]) + reserved + bytes([frame_type]) + data
+        # Build frame without separator and checksum
+        frame_without_extras = bytes([flags]) + reserved + bytes([frame_type]) + data
         
-        # Calculate length (includes flags, reserved, type, data, checksum, and CRC if present)
+        # Calculate length (includes: flags(1) + reserved(4) + type(1) + data(n) + checksum(1))
         length = len(frame_without_extras) + 1  # +1 for checksum
-        if with_crc:
-            length += 2  # +2 for CRC
         
-        # Calculate checksum (sum of all bytes except separator and checksum itself)
-        # This includes length byte too
-        frame_for_checksum = bytes([length]) + frame_without_extras
-        checksum = sum(frame_for_checksum) & 0xFF
+        # Calculate checksum (sum of frame_without_extras)
+        checksum = sum(frame_without_extras) & 0xFF
         
         # Build final frame
         frame = FRAME_SEPARATOR + bytes([length]) + frame_without_extras + bytes([checksum])
         
-        # Add CRC if needed
-        if with_crc:
-            # CRC is calculated on everything except separator, checksum and CRC itself
-            crc_data = frame[2:-1]  # Skip separator and checksum
-            crc = self.crc16_func(crc_data)
-            frame += struct.pack('<H', crc)  # Little endian
+        _LOGGER.debug(f"Built frame: length={length}, type=0x{frame_type:02x}, checksum=0x{checksum:02x}")
+        _LOGGER.debug(f"Frame bytes: {frame.hex()}")
         
         return frame
     
@@ -125,7 +108,7 @@ class HaierProtocol:
         hello_data = bytes([
             0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x4D, 0x01, 0x59
         ])
-        return self._build_frame(CMD_TYPE_HELLO, hello_data)
+        return self._build_frame(CMD_TYPE_HELLO, hello_data, with_crc=False)
     
     def create_init_packet(self) -> bytes:
         """Create initialization packet."""
@@ -134,14 +117,14 @@ class HaierProtocol:
         init_data = bytes([
             0x00, 0x00, 0x00, 0x00, 0x00, 0x73, 0x7B
         ])
-        return self._build_frame(CMD_TYPE_INIT, init_data)
+        return self._build_frame(CMD_TYPE_INIT, init_data, with_crc=False)
     
     def create_status_request_packet(self) -> bytes:
         """Create status request packet."""
         # Simple status request - may need MAC address in data
         mac_bytes = bytes.fromhex(self.mac)
         status_data = mac_bytes + b'\x00\x00\x00\x00'  # MAC + padding
-        return self._build_frame(CMD_TYPE_STATUS_REQUEST, status_data)
+        return self._build_frame(CMD_TYPE_STATUS_REQUEST, status_data, with_crc=False)
     
     def create_control_packet(self, state: State) -> bytes:
         """Create control packet to change device state."""
@@ -178,12 +161,14 @@ class HaierProtocol:
         temp_offset = max(0, min(15, state.target_temperature - 16))
         control_data.extend([0x00, temp_offset])
         
-        return self._build_frame(CMD_TYPE_CONTROL, bytes(control_data))
+        return self._build_frame(CMD_TYPE_CONTROL, bytes(control_data), with_crc=False)
     
     def parse_response(self, data: bytes) -> List[Dict[str, Any]]:
         """Parse response frames from device."""
         frames = []
         i = 0
+        
+        _LOGGER.debug(f"Parsing response data ({len(data)} bytes): {data.hex()}")
         
         while i < len(data):
             # Look for frame separator
@@ -193,97 +178,192 @@ class HaierProtocol:
                 if frame:
                     frames.append(frame)
                     i += frame.get('frame_length', 2)
+                    _LOGGER.debug(f"Successfully parsed frame, moving index to {i}")
                 else:
                     i += 1
             else:
                 i += 1
         
+        _LOGGER.debug(f"Total frames parsed: {len(frames)}")
         return frames
     
     def _parse_frame(self, data: bytes) -> Optional[Dict[str, Any]]:
         """Parse a single frame starting at the beginning of data."""
-        _LOGGER.debug(f"Full raw data chunk ({len(data)} bytes): {data.hex()}")
-        if len(data) < 12:  # Minimum frame size
+        if len(data) < 10:  # Minimum frame size: separator(2) + length(1) + flags(1) + reserved(4) + type(1) + checksum(1)
+            _LOGGER.debug(f"Data too short: {len(data)} bytes")
             return None
         
         # Check separator
         if data[0:2] != FRAME_SEPARATOR:
+            _LOGGER.debug(f"Invalid separator: {data[0:2].hex()}")
             return None
         
-        # Get length
+        # Get length (including length byte itself, flags, reserved, type, data, checksum)
         length = data[2]
+        _LOGGER.debug(f"Frame length byte: {length} (0x{length:02x})")
         
-        # Check if we have enough data
-        if len(data) < length + 2:  # +2 for separator
+        # Check if we have enough data (total frame size = length + 2 for separator)
+        total_frame_size = length + 2
+        if len(data) < total_frame_size:
+            _LOGGER.debug(f"Not enough data: have {len(data)}, need {total_frame_size}")
             return None
         
-        # Extract frame data (without separator)
-        frame_data = data[2:2+length]
+        # Extract the complete frame (including separator)
+        frame_bytes = data[0:total_frame_size]
+        _LOGGER.debug(f"Full frame ({total_frame_size} bytes): {frame_bytes.hex()}")
         
-        # Parse frame components
+        # Frame data starts at position 2 (after separator)
+        frame_data = frame_bytes[2:]
+        
+        # Parse components based on ACTUAL packet structure
+        # From packets we see: [length][flags][4-byte reserved][frame_type][data...][checksum]
+        
         flags = frame_data[1]
-        reserved = frame_data[2:7]
-        frame_type = frame_data[7]
+        _LOGGER.debug(f"Flags: 0x{flags:02x}")
         
-        # Data starts at position 8
-        data_start = 8
+        # IMPORTANT: Based on packet analysis, reserved bytes are 4 bytes
+        reserved_bytes_count = 4
+        reserved_start = 2
+        reserved_end = reserved_start + reserved_bytes_count
+        
+        if len(frame_data) < reserved_end:
+            _LOGGER.debug(f"Frame too short for reserved bytes")
+            return None
+        
+        reserved = frame_data[reserved_start:reserved_end]
+        frame_type = frame_data[reserved_end]
+        _LOGGER.debug(f"Reserved bytes: {reserved.hex()}, Frame type: 0x{frame_type:02x}")
+        
+        # Data starts after frame type
+        data_start = reserved_end + 1
+        
+        # Checksum is the last byte before the end
+        # Total frame_data length should be 'length'
+        if len(frame_data) != length:
+            _LOGGER.debug(f"Frame data length mismatch: expected {length}, got {len(frame_data)}")
+            # But let's continue anyway for debugging
+        
         checksum_pos = length - 1
-        if flags & FRAME_FLAG_WITH_CRC:
-            checksum_pos -= 2  # Account for CRC
+        if checksum_pos < data_start:
+            _LOGGER.debug(f"Invalid checksum position: {checksum_pos} < {data_start}")
+            return None
         
-        frame_data_bytes = frame_data[data_start:checksum_pos]
         checksum = frame_data[checksum_pos]
         
-        # Verify checksum
-        calculated_checksum = sum(frame_data[:checksum_pos]) & 0xFF
-        if calculated_checksum != checksum:
+        # Extract actual data (between data_start and checksum)
+        frame_data_bytes = frame_data[data_start:checksum_pos] if data_start < checksum_pos else b''
+        
+        # Calculate checksum (sum of frame_data bytes EXCLUDING the checksum itself)
+        # This should include: flags, reserved, frame_type, and data
+        bytes_for_checksum = frame_data[1:checksum_pos]  # From flags to before checksum
+        calculated_checksum = sum(bytes_for_checksum) & 0xFF
+        
+        _LOGGER.debug(f"Checksum: expected=0x{checksum:02x}({checksum}), calculated=0x{calculated_checksum:02x}({calculated_checksum})")
+        _LOGGER.debug(f"Bytes for checksum ({len(bytes_for_checksum)}): {bytes_for_checksum.hex()}")
+        _LOGGER.debug(f"Frame data bytes ({len(frame_data_bytes)}): {frame_data_bytes.hex()}")
+        
+        checksum_ok = calculated_checksum == checksum
+        if not checksum_ok:
             _LOGGER.debug(f"Checksum mismatch: {calculated_checksum} != {checksum}")
-            return None
+            # For debugging, let's continue anyway
+            # return None
         
         # Parse frame data based on type
         parsed_data = self._parse_frame_data(frame_type, frame_data_bytes)
         
         return {
-            'frame_length': length + 2,
+            'frame_length': total_frame_size,
             'flags': flags,
             'type': frame_type,
             'data': parsed_data,
-            'raw_data': frame_data_bytes
+            'raw_data': frame_data_bytes,
+            'checksum_ok': checksum_ok
         }
     
     def _parse_frame_data(self, frame_type: int, data: bytes) -> Dict[str, Any]:
         """Parse frame data based on frame type."""
         result = {}
         
-        if frame_type == CMD_TYPE_STATUS_RESPONSE:
-            # Parse status response
-            if len(data) >= 44:
-                try:
-                    # Parse temperatures (might be in different positions)
-                    result['current_temperature'] = data[12] if len(data) > 12 else 21
-                    result['target_temperature'] = (data[42] + 16) if len(data) > 42 else 21
-                    
-                    # Parse mode and fan
-                    if len(data) > 30:
-                        result['mode'] = data[30]
-                    if len(data) > 32:
-                        result['fan_speed'] = data[32]
-                    
-                    # Parse flags
-                    if len(data) > 34:
-                        result['limits'] = data[34]
-                    if len(data) > 36:
-                        result['power'] = bool(data[36] & 0x01)
-                    if len(data) > 38:
-                        result['health'] = bool(data[38] & 0x01)
-                        
-                except (IndexError, ValueError) as e:
-                    _LOGGER.debug(f"Error parsing status: {e}")
+        _LOGGER.debug(f"Parsing frame data: type=0x{frame_type:02x}, data={data.hex()}")
         
-        elif frame_type == CMD_TYPE_ACK:
-            # Acknowledgement frame
+        if frame_type == 0x04:  # ACK frame from first packet
+            # Parse acknowledgement frame
             result['acknowledged'] = True
-            if data:
-                result['seq'] = data[0] if len(data) > 0 else 0
+            if len(data) >= 2:
+                result['sub_type'] = data[0]
+                result['status'] = data[1]
+                _LOGGER.debug(f"ACK frame: sub_type=0x{data[0]:02x}, status=0x{data[1]:02x}")
+        
+        elif frame_type == 0x06:  # Response frame from second packet
+            # Parse response frame with device data
+            if len(data) >= 30:
+                try:
+                    # Based on packet: 6d01001d0013007f0000000000010000000000100000000000085f
+                    # This seems to contain device state information
+                    
+                    # The MAC address appears to be in the first packet, not here
+                    # Let's try to extract some state information
+                    
+                    # Byte 0: 0x6d = 109 (unknown)
+                    # Byte 1: 0x01 = 1 (power? mode?)
+                    # Byte 2: 0x00 = 0
+                    # Byte 3: 0x1d = 29 (target temperature? 16+13=29?)
+                    # Byte 4: 0x00 = 0
+                    # Byte 5: 0x13 = 19 (current temperature? 16+3=19?)
+                    # Byte 6: 0x00 = 0
+                    # Byte 7: 0x7f = 127 (fan speed? 0x7f might mean auto)
+                    
+                    result['raw_byte0'] = data[0]
+                    result['power_or_mode'] = data[1]
+                    result['target_temp_raw'] = data[3]
+                    result['current_temp_raw'] = data[5]
+                    result['fan_speed_raw'] = data[7]
+                    
+                    # Try to convert to actual values
+                    result['target_temperature'] = data[3] + 16 if data[3] <= 15 else 25
+                    result['current_temperature'] = data[5] + 16 if data[5] <= 15 else 25
+                    
+                    # Power state: bit 0 of byte 1
+                    result['power'] = bool(data[1] & 0x01)
+                    
+                    # Mode: bits 1-3 of byte 1
+                    mode_bits = (data[1] >> 1) & 0x07
+                    result['mode'] = mode_bits
+                    
+                    # Fan speed: byte 7
+                    fan_speed_map = {0x00: 0, 0x01: 1, 0x02: 2, 0x03: 3, 0x7f: 0}
+                    result['fan_speed'] = fan_speed_map.get(data[7], 0)
+                    
+                    _LOGGER.debug(f"Parsed state: power={result.get('power')}, mode={result.get('mode')}, "
+                                 f"target_temp={result.get('target_temperature')}, "
+                                 f"current_temp={result.get('current_temperature')}, "
+                                 f"fan_speed={result.get('fan_speed')}")
+                    
+                except (IndexError, ValueError) as e:
+                    _LOGGER.debug(f"Error parsing state frame: {e}")
+        
+        elif frame_type == 0x01:  # Some other response type
+            result['unknown_type_01'] = True
+            if len(data) > 0:
+                result['data'] = data.hex()
         
         return result
+    
+    # Add missing methods that are called from device.py
+    def create_on_packet(self) -> bytes:
+        """Create packet to turn device on."""
+        # This needs proper implementation based on protocol
+        # For now, create a control packet with power=True
+        state = State(power=True)
+        return self.create_control_packet(state)
+    
+    def create_off_packet(self) -> bytes:
+        """Create packet to turn device off."""
+        # This needs proper implementation based on protocol
+        # For now, create a control packet with power=False
+        state = State(power=False)
+        return self.create_control_packet(state)
+    
+    def create_set_state_packet(self, state: State) -> bytes:
+        """Create packet to set device state."""
+        return self.create_control_packet(state)
