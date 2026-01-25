@@ -60,7 +60,7 @@ class HaierDevice:
         self._last_update = None
         self._update_interval = timedelta(seconds=30)
         
-        # Sequence number (like in TS library)
+        # Sequence number (как в TS библиотеке)
         self._seq = 0
         
         # Response handling
@@ -75,7 +75,7 @@ class HaierDevice:
             if not await self.hass.async_add_executor_job(test_connection, self.ip_address):
                 raise ConnectionError(f"Cannot connect to device at {self.ip_address}:{self.port}")
             
-            # Establish TCP connection (like in TS library)
+            # Establish TCP connection (как в TS библиотеке)
             await self._establish_connection()
             
             self._connected = True
@@ -151,7 +151,7 @@ class HaierDevice:
         if seq is None:
             seq = self._seq
         
-        # Increment sequence like in TS library
+        # Increment sequence как в TS библиотеке
         self._seq = (seq + 1) % 256
         
         # Create command with sequence
@@ -175,7 +175,7 @@ class HaierDevice:
             
         except asyncio.TimeoutError:
             _LOGGER.warning(f"Timeout waiting for response with seq {seq}")
-            # Try to reconnect like in TS library
+            # Try to reconnect как в TS библиотеке
             try:
                 await self._close_connection()
                 await self.async_connect()
@@ -209,6 +209,12 @@ class HaierDevice:
                     # Connection closed
                     _LOGGER.debug("Connection closed by device")
                     self._connected = False
+                    # Try to reconnect
+                    try:
+                        await self._close_connection()
+                        await self.async_connect()
+                    except:
+                        pass
                     break
                 
                 _LOGGER.debug(f"Received {len(data)} bytes from device")
@@ -307,7 +313,7 @@ class HaierDevice:
     async def change_state(self, new_state: Dict[str, Any]):
         """Change device state (partial update)."""
         # Ensure power is on if we're changing state (like in TS library)
-        if not self._state.power:
+        if not self._state.power and any(k in new_state for k in ['mode', 'fan_speed', 'target_temperature', 'limits', 'health']):
             success = await self.on()
             if not success:
                 return False
@@ -315,7 +321,7 @@ class HaierDevice:
         # Apply state validation like in TS library
         if 'target_temperature' in new_state:
             target_temp = new_state['target_temperature']
-            # Clamp temperature like in TS library
+            # Clamp temperature как в TS библиотеке
             if target_temp < 16:
                 target_temp = 16
             if target_temp > 30:
@@ -324,15 +330,16 @@ class HaierDevice:
             new_state['target_temperature'] = target_temp
         
         # Merge with current state
-        merged_state = State(
-            current_temperature=self._state.current_temperature,
-            target_temperature=new_state.get('target_temperature', self._state.target_temperature),
-            fan_speed=new_state.get('fan_speed', self._state.fan_speed),
-            mode=new_state.get('mode', self._state.mode),
-            health=new_state.get('health', self._state.health),
-            limits=new_state.get('limits', self._state.limits),
-            power=True  # Already ensured to be on
-        )
+        async with self._state_lock:
+            merged_state = State(
+                current_temperature=self._state.current_temperature,
+                target_temperature=new_state.get('target_temperature', self._state.target_temperature),
+                fan_speed=new_state.get('fan_speed', self._state.fan_speed),
+                mode=new_state.get('mode', self._state.mode),
+                health=new_state.get('health', self._state.health),
+                limits=new_state.get('limits', self._state.limits),
+                power=True  # Already ensured to be on
+            )
         
         def create_command(seq):
             return self.protocol.create_set_state_packet(merged_state, seq)
@@ -342,20 +349,6 @@ class HaierDevice:
     async def set_health_mode(self, enabled: bool):
         """Set health mode on or off."""
         return await self.change_state({'health': enabled})
-
-    async def hello(self):
-        """Send hello packet (for debugging)."""
-        def create_command(seq):
-            return self.protocol.create_hello_packet(seq)
-        
-        return await self._send_request(create_command, seq=0)
-
-    async def init(self):
-        """Send init packet (for debugging)."""
-        def create_command(seq):
-            return self.protocol.create_init_packet(seq)
-        
-        return await self._send_request(create_command, seq=0)
 
     # Property accessors for Home Assistant
     @property
