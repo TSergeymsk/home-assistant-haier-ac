@@ -60,11 +60,10 @@ class HaierDevice:
         self._last_update = None
         self._update_interval = timedelta(seconds=30)
         
-        # Sequence number for commands (like in TS library)
-        self._seq = 0
-        
-        # Response handling - simplified like TS library
-        self._response_events = {}
+        # Response handling
+        self._response_waiter = None
+        self._expected_seq = None
+        self._received_responses = {}
         
         _LOGGER.info(f"Initialized Haier device {name} at {ip_address}:{self.port}")
 
@@ -75,11 +74,26 @@ class HaierDevice:
             if not await self.hass.async_add_executor_job(test_connection, self.ip_address):
                 raise ConnectionError(f"Cannot connect to device at {self.ip_address}:{self.port}")
             
-            # Establish TCP connection (no hello/init packets)
+            # Establish TCP connection
             await self._establish_connection()
             
+            # Send hello packet and wait for response
+            hello_packet = self.protocol.create_hello_packet()
+            _LOGGER.debug(f"Sending hello packet: {hello_packet.hex()}")
+            await self._send_raw_packet(hello_packet)
+            
+            # Wait for response (give it some time)
+            await asyncio.sleep(1.0)
+            
+            # Send init packet
+            init_packet = self.protocol.create_init_packet()
+            _LOGGER.debug(f"Sending init packet: {init_packet.hex()}")
+            await self._send_raw_packet(init_packet)
+            
+            await asyncio.sleep(1.0)
+            
             self._connected = True
-            _LOGGER.info(f"Connected to Haier device {self.name}")
+            _LOGGER.info(f"Connected to Haier device {self.name} using official protocol")
             
         except Exception as ex:
             _LOGGER.error(f"Failed to connect to device: {ex}")
@@ -133,30 +147,18 @@ class HaierDevice:
         try:
             self._writer.write(packet)
             await self._writer.drain()
-            _LOGGER.debug(f"Sent packet: {binascii.hexlify(packet).decode()}")
+            _LOGGER.debug(f"Sent packet of length {len(packet)}")
         except Exception as ex:
             _LOGGER.error(f"Failed to send packet: {ex}")
             self._connected = False
             raise
 
-    async def _send_request(self, create_command_func, timeout: float = 2.0):
-        """Send request and wait for response (like in TS library)."""
-        if not self._connected:
-            try:
-                await self.async_connect()
-            except Exception as ex:
-                _LOGGER.error(f"Failed to reconnect: {ex}")
-                return False
-        
-        seq = self._seq
-        self._seq = (self._seq + 1) % 256
-        
-        # Create command with sequence
-        packet = create_command_func(seq)
-        
-        # Create event for waiting response
+    async def _send_and_wait(self, packet: bytes, seq: int, timeout: float = 2.0):
+        """Send packet and wait for response with given sequence."""
+        # Set up response waiter
+        self._expected_seq = seq
         response_event = asyncio.Event()
-        self._response_events[seq] = {'event': response_event, 'data': None}
+        self._received_responses[seq] = {'event': response_event, 'data': None}
         
         try:
             # Send packet
@@ -167,22 +169,17 @@ class HaierDevice:
                 await response_event.wait()
             
             # Get response data
-            response_data = self._response_events[seq]['data']
-            return True if response_data else False
+            response = self._received_responses[seq]['data']
+            return response
             
         except asyncio.TimeoutError:
             _LOGGER.warning(f"Timeout waiting for response with seq {seq}")
-            # Try to reconnect like in TS library
-            try:
-                await self._close_connection()
-                await self.async_connect()
-            except:
-                pass
-            return False
+            return None
         finally:
             # Clean up
-            if seq in self._response_events:
-                del self._response_events[seq]
+            if seq in self._received_responses:
+                del self._received_responses[seq]
+            self._expected_seq = None
 
     async def _listen_for_responses(self):
         """Listen for responses from device."""
@@ -216,40 +213,61 @@ class HaierDevice:
                     frame_type = response.get('type')
                     command = response.get('command')
                     seq = response.get('seq')
-                    _LOGGER.debug(f"Parsed response: type=0x{frame_type:02x}, command=0x{command:02x}, seq={seq}")
                     
-                    # Check if this is a state response
-                    if response.get('command_type') == 0x22:  # State response
+                    # Безопасное логирование
+                    try:
+                        if frame_type is not None and command is not None:
+                            _LOGGER.debug(f"Parsed response: type=0x{frame_type:02x}, command=0x{command:02x}, seq={seq}")
+                        else:
+                            _LOGGER.debug(f"Parsed response with missing fields: {response}")
+                    except Exception as log_ex:
+                        _LOGGER.debug(f"Error logging response: {log_ex}, response: {response}")
+                    
+                    # ОТПРАВКА ACK В ОТВЕТ НА ПЕРВЫЙ ПАКЕТ (тип 0x04)
+                    if frame_type == 0x04:  # ACK от устройства
+                        _LOGGER.debug(f"Received ACK from device, sending response ACK")
+                        try:
+                            # Создаем и отправляем ответный ACK-пакет
+                            # В данных ACK используем полученный ack_status (0x5a = 90)
+                            ack_data = bytes([0x5a, 0x00])  # Простой ACK-ответ
+                            ack_packet = self.protocol._build_frame(0x04, ack_data, with_crc=False)
+                            await self._send_raw_packet(ack_packet)
+                            _LOGGER.debug(f"Sent ACK response to device: {ack_packet.hex()}")
+                        except Exception as ex:
+                            _LOGGER.error(f"Failed to send ACK response: {ex}")
+                    
+                    # Update device state if we have state data
+                    if frame_type == 0x06 or frame_type == 0x22:  # State response
                         state_data = response.get('data', {})
                         if state_data:
                             async with self._state_lock:
                                 # Update device state from parsed data
-                                # Convert temperature like in TS library
-                                if 'current_temperature' in state_data:
-                                    self._state.current_temperature = state_data['current_temperature']
-                                if 'target_temperature' in state_data:
-                                    self._state.target_temperature = state_data['target_temperature'] + 16
-                                if 'fan_speed' in state_data:
-                                    self._state.fan_speed = state_data['fan_speed']
+                                if 'power' in state_data:
+                                    self._state.power = state_data['power']
                                 if 'mode' in state_data:
                                     self._state.mode = state_data['mode']
+                                if 'target_temperature' in state_data:
+                                    self._state.target_temperature = state_data['target_temperature']
+                                if 'current_temperature' in state_data:
+                                    self._state.current_temperature = state_data['current_temperature']
+                                if 'fan_speed' in state_data:
+                                    self._state.fan_speed = state_data['fan_speed']
                                 if 'health' in state_data:
-                                    # Convert to boolean like in TS library
-                                    self._state.health = bool(state_data['health'] % 2)
-                                if 'power' in state_data:
-                                    # Convert to boolean like in TS library
-                                    self._state.power = bool(state_data['power'] % 2)
+                                    self._state.health = state_data['health']
                                 if 'limits' in state_data:
                                     self._state.limits = state_data['limits']
-                                    
                                 self._last_update = datetime.now()
-                                _LOGGER.debug(f"State updated: {self._state}")
+                                _LOGGER.debug(f"State updated from response: power={self._state.power}, "
+                                            f"mode={self._state.mode}, target_temp={self._state.target_temperature}, "
+                                            f"current_temp={self._state.current_temperature}, fan_speed={self._state.fan_speed}, "
+                                            f"health={self._state.health}, limits={self._state.limits}")
                     
                     # Signal waiter if this is the expected response
-                    if seq is not None and seq in self._response_events:
-                        self._response_events[seq]['data'] = response
-                        self._response_events[seq]['event'].set()
-                        _LOGGER.debug(f"Signaled waiter for seq {seq}")
+                    if self._expected_seq is not None:
+                        if self._expected_seq in self._received_responses:
+                            self._received_responses[self._expected_seq]['data'] = response
+                            self._received_responses[self._expected_seq]['event'].set()
+                            _LOGGER.debug(f"Signaled waiter for seq {self._expected_seq}")
             
             except asyncio.CancelledError:
                 _LOGGER.debug("Listening task cancelled")
@@ -262,103 +280,126 @@ class HaierDevice:
 
     async def update(self):
         """Update device state by requesting current state."""
-        # Send status request using sequence
-        try:
-            packet = self.protocol.create_status_request_packet(self._seq)
-            seq = self._seq
-            self._seq = (self._seq + 1) % 256
-            
-            # Create event for waiting response
-            response_event = asyncio.Event()
-            self._response_events[seq] = {'event': response_event, 'data': None}
-            
-            await self._send_raw_packet(packet)
-            
-            # Wait for response
+        if not self._connected:
             try:
-                async with async_timeout.timeout(3.0):
-                    await response_event.wait()
-                
-                # Response will be processed in _listen_for_responses
-                return True
-            except asyncio.TimeoutError:
-                _LOGGER.warning("Timeout waiting for status response")
-                return False
-            finally:
-                if seq in self._response_events:
-                    del self._response_events[seq]
-                    
+                await self.async_connect()
+            except Exception:
+                return
+        
+        # Send status request
+        try:
+            # Use sequence number 10 for state requests
+            packet = self.protocol.create_status_request_packet()
+            response = await self._send_and_wait(packet, seq=10, timeout=3.0)
+            
+            if response:
+                _LOGGER.debug(f"Update response received: {response}")
+                # Check if response contains state data
+                if 'data' in response:
+                    state_data = response.get('data', {})
+                    if state_data:
+                        async with self._state_lock:
+                            # Update state from response
+                            if 'power' in state_data:
+                                self._state.power = state_data['power']
+                            if 'mode' in state_data:
+                                self._state.mode = state_data['mode']
+                            if 'target_temperature' in state_data:
+                                self._state.target_temperature = state_data['target_temperature']
+                            if 'current_temperature' in state_data:
+                                self._state.current_temperature = state_data['current_temperature']
+                            if 'fan_speed' in state_data:
+                                self._state.fan_speed = state_data['fan_speed']
+                            if 'health' in state_data:
+                                self._state.health = state_data['health']
+                            if 'limits' in state_data:
+                                self._state.limits = state_data['limits']
+                            self._last_update = datetime.now()
+                            _LOGGER.debug(f"State updated from update request: {self._state}")
         except Exception as ex:
             _LOGGER.warning(f"Failed to update state: {ex}")
-            return False
 
-    # Command methods matching TS library
+    # Command methods matching haier-ac-remote API
     async def on(self):
         """Turn device on."""
-        def create_command(seq):
-            return self.protocol.create_on_packet(seq)
-        
-        return await self._send_request(create_command)
+        # Use sequence number 2 for on command
+        response = await self._send_and_wait(self.protocol.create_on_packet(), seq=2)
+        if response:
+            async with self._state_lock:
+                self._state.power = True
+                self._last_update = datetime.now()
+            return True
+        return False
 
     async def off(self):
         """Turn device off."""
-        def create_command(seq):
-            return self.protocol.create_off_packet(seq)
-        
-        return await self._send_request(create_command)
+        # Use sequence number 3 for off command
+        response = await self._send_and_wait(self.protocol.create_off_packet(), seq=3)
+        if response:
+            async with self._state_lock:
+                self._state.power = False
+                self._last_update = datetime.now()
+            return True
+        return False
 
     async def change_state(self, new_state: Dict[str, Any]):
         """Change device state (partial update)."""
-        # Ensure power is on if we're changing state (like in TS library)
-        if not self._state.power:
-            success = await self.on()
-            if not success:
-                return False
+        async with self._state_lock:
+            # Create updated state
+            updated_state = State(
+                current_temperature=self._state.current_temperature,
+                target_temperature=new_state.get('target_temperature', self._state.target_temperature),
+                fan_speed=new_state.get('fan_speed', self._state.fan_speed),
+                mode=new_state.get('mode', self._state.mode),
+                health=new_state.get('health', self._state.health),
+                limits=new_state.get('limits', self._state.limits),
+                power=self._state.power  # Keep current power state
+            )
+            
+            # Ensure power is on if we're changing state
+            if not updated_state.power and any(k in new_state for k in ['mode', 'fan_speed', 'target_temperature', 'limits', 'health']):
+                await self.on()
+                updated_state.power = True
         
-        # Apply state validation like in TS library
-        if 'target_temperature' in new_state:
-            target_temp = new_state['target_temperature']
-            # Clamp temperature like in TS library
-            if target_temp < 16:
-                target_temp = 16
-            if target_temp > 30:
-                target_temp = 30
-            target_temp = round(target_temp)
-            new_state['target_temperature'] = target_temp
+        # Send setState command with sequence 20
+        packet = self.protocol.create_set_state_packet(updated_state)
+        response = await self._send_and_wait(packet, seq=20, timeout=3.0)
         
-        # Merge with current state
-        merged_state = State(
-            current_temperature=self._state.current_temperature,
-            target_temperature=new_state.get('target_temperature', self._state.target_temperature),
-            fan_speed=new_state.get('fan_speed', self._state.fan_speed),
-            mode=new_state.get('mode', self._state.mode),
-            health=new_state.get('health', self._state.health),
-            limits=new_state.get('limits', self._state.limits),
-            power=True  # Already ensured to be on
-        )
+        if response:
+            _LOGGER.debug(f"Change state response: {response}")
+            # If response contains state data, update from it
+            if 'data' in response:
+                state_data = response.get('data', {})
+                if state_data:
+                    async with self._state_lock:
+                        if 'power' in state_data:
+                            self._state.power = state_data['power']
+                        if 'mode' in state_data:
+                            self._state.mode = state_data['mode']
+                        if 'target_temperature' in state_data:
+                            self._state.target_temperature = state_data['target_temperature']
+                        if 'current_temperature' in state_data:
+                            self._state.current_temperature = state_data['current_temperature']
+                        if 'fan_speed' in state_data:
+                            self._state.fan_speed = state_data['fan_speed']
+                        if 'health' in state_data:
+                            self._state.health = state_data['health']
+                        if 'limits' in state_data:
+                            self._state.limits = state_data['limits']
+                        self._last_update = datetime.now()
+            return True
         
-        def create_command(seq):
-            return self.protocol.create_set_state_packet(merged_state, seq)
-        
-        return await self._send_request(create_command, timeout=3.0)
+        return False
 
+    # Health mode methods
     async def set_health_mode(self, enabled: bool):
         """Set health mode on or off."""
+        async with self._state_lock:
+            self._state.health = enabled
+            self._last_update = datetime.now()
+        
+        # Send change_state with health mode update
         return await self.change_state({'health': enabled})
-
-    async def hello(self):
-        """Send hello packet (for debugging)."""
-        def create_command(seq):
-            return self.protocol.create_hello_packet(seq)
-        
-        return await self._send_request(create_command)
-
-    async def init(self):
-        """Send init packet (for debugging)."""
-        def create_command(seq):
-            return self.protocol.create_init_packet(seq)
-        
-        return await self._send_request(create_command)
 
     # Property accessors for Home Assistant
     @property
