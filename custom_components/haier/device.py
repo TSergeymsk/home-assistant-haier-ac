@@ -210,23 +210,45 @@ class HaierDevice:
                 responses = self.protocol.parse_response(data)
                 
                 for response in responses:
-                    seq = response.get('seq')
-                    cmd_type = response.get('command_type')
-                    state = response.get('state')
+                    frame_type = response.get('type')
+                    command = response.get('command')
+                    _LOGGER.debug(f"Parsed response: type=0x{frame_type:02x}, command=0x{command:02x}")
                     
-                    _LOGGER.debug(f"Parsed response: seq={seq}, type={cmd_type}")
+                    # Update device state if we have state data
+                    if frame_type == 0x06:  # State response
+                        state_data = response.get('data', {})
+                        if state_data:
+                            async with self._state_lock:
+                                # Update device state from parsed data
+                                if 'power' in state_data:
+                                    self._state.power = state_data['power']
+                                if 'mode' in state_data:
+                                    self._state.mode = state_data['mode']
+                                if 'target_temperature' in state_data:
+                                    self._state.target_temperature = state_data['target_temperature']
+                                if 'current_temperature' in state_data:
+                                    self._state.current_temperature = state_data['current_temperature']
+                                if 'fan_speed' in state_data:
+                                    self._state.fan_speed = state_data['fan_speed']
+                                self._last_update = datetime.now()
+                                _LOGGER.debug(f"State updated from response: power={self._state.power}, "
+                                            f"mode={self._state.mode}, target_temp={self._state.target_temperature}, "
+                                            f"current_temp={self._state.current_temperature}, fan_speed={self._state.fan_speed}")
                     
-                    # Update state if we got one
-                    if state:
-                        async with self._state_lock:
-                            self._state = state
-                            self._last_update = datetime.now()
-                            _LOGGER.debug(f"State updated: {self._state}")
+                    # Also handle ACK frames (0x04)
+                    elif frame_type == 0x04:  # ACK frame
+                        _LOGGER.debug(f"Received ACK frame")
+                        state_data = response.get('data', {})
+                        if state_data:
+                            _LOGGER.debug(f"ACK data: {state_data}")
                     
                     # Signal waiter if this is the expected response
-                    if seq is not None and seq in self._received_responses:
-                        self._received_responses[seq]['data'] = response
-                        self._received_responses[seq]['event'].set()
+                    # Note: We don't have seq in responses from device yet, so we'll signal any response
+                    if self._expected_seq is not None:
+                        if self._expected_seq in self._received_responses:
+                            self._received_responses[self._expected_seq]['data'] = response
+                            self._received_responses[self._expected_seq]['event'].set()
+                            _LOGGER.debug(f"Signaled waiter for seq {self._expected_seq}")
                 
             except asyncio.CancelledError:
                 _LOGGER.debug("Listening task cancelled")
@@ -245,20 +267,32 @@ class HaierDevice:
             except Exception:
                 return
         
-        # Send setState with current values to get response
+        # Send status request
         try:
-            async with self._state_lock:
-                current_state = self._state
-            
             # Use sequence number 10 for state requests
-            packet = self.protocol.create_set_state_packet(current_state)
+            packet = self.protocol.create_status_request_packet()
             response = await self._send_and_wait(packet, seq=10, timeout=3.0)
             
-            if response and 'state' in response and response['state']:
-                async with self._state_lock:
-                    self._state = response['state']
-                    self._last_update = datetime.now()
-                    _LOGGER.debug(f"State updated from device: {self._state}")
+            if response:
+                _LOGGER.debug(f"Update response received: {response}")
+                # Check if response contains state data
+                if 'data' in response:
+                    state_data = response.get('data', {})
+                    if state_data and ('power' in state_data or 'current_temperature' in state_data):
+                        async with self._state_lock:
+                            # Update state from response
+                            if 'power' in state_data:
+                                self._state.power = state_data['power']
+                            if 'mode' in state_data:
+                                self._state.mode = state_data['mode']
+                            if 'target_temperature' in state_data:
+                                self._state.target_temperature = state_data['target_temperature']
+                            if 'current_temperature' in state_data:
+                                self._state.current_temperature = state_data['current_temperature']
+                            if 'fan_speed' in state_data:
+                                self._state.fan_speed = state_data['fan_speed']
+                            self._last_update = datetime.now()
+                            _LOGGER.debug(f"State updated from update request: {self._state}")
         except Exception as ex:
             _LOGGER.warning(f"Failed to update state: {ex}")
 
@@ -271,7 +305,8 @@ class HaierDevice:
             async with self._state_lock:
                 self._state.power = True
                 self._last_update = datetime.now()
-        return response is not None
+            return True
+        return False
 
     async def off(self):
         """Turn device off."""
@@ -281,7 +316,8 @@ class HaierDevice:
             async with self._state_lock:
                 self._state.power = False
                 self._last_update = datetime.now()
-        return response is not None
+            return True
+        return False
 
     async def change_state(self, new_state: Dict[str, Any]):
         """Change device state (partial update)."""
@@ -306,53 +342,87 @@ class HaierDevice:
         packet = self.protocol.create_set_state_packet(updated_state)
         response = await self._send_and_wait(packet, seq=20, timeout=3.0)
         
-        if response and 'state' in response and response['state']:
-            async with self._state_lock:
-                self._state = response['state']
-                self._last_update = datetime.now()
+        if response:
+            _LOGGER.debug(f"Change state response: {response}")
+            # If response contains state data, update from it
+            if 'data' in response:
+                state_data = response.get('data', {})
+                if state_data:
+                    async with self._state_lock:
+                        if 'power' in state_data:
+                            self._state.power = state_data['power']
+                        if 'mode' in state_data:
+                            self._state.mode = state_data['mode']
+                        if 'target_temperature' in state_data:
+                            self._state.target_temperature = state_data['target_temperature']
+                        if 'current_temperature' in state_data:
+                            self._state.current_temperature = state_data['current_temperature']
+                        if 'fan_speed' in state_data:
+                            self._state.fan_speed = state_data['fan_speed']
+                        self._last_update = datetime.now()
             return True
         
         return False
 
+    # Health mode methods
+    async def set_health_mode(self, enabled: bool):
+        """Set health mode on or off."""
+        async with self._state_lock:
+            self._state.health = enabled
+            self._last_update = datetime.now()
+        
+        # Send change_state with health mode update
+        return await self.change_state({'health': enabled})
+
     # Property accessors for Home Assistant
     @property
     def power(self):
+        """Return power state."""
         return self._state.power
         
     @property
     def mode(self):
+        """Return current mode."""
         return self._state.mode
         
     @property
     def target_temperature(self):
+        """Return target temperature."""
         return self._state.target_temperature
         
     @property
     def current_temperature(self):
+        """Return current temperature."""
         return self._state.current_temperature
         
     @property
     def fan_speed(self):
+        """Return fan speed."""
         return self._state.fan_speed
         
     @property
     def swing_mode(self):
+        """Return swing mode."""
         return self._state.limits
         
     @property
     def health_mode(self):
+        """Return health mode state."""
         return self._state.health
         
     @property
     def mac(self):
+        """Return MAC address."""
         return self.protocol.mac
         
     @property
     def available(self):
+        """Return True if device is available."""
         if self._last_update is None:
             return False
         return datetime.now() - self._last_update < timedelta(minutes=5)
         
     @property
     def is_connected(self):
+        """Return True if connected to device."""
         return self._connected and self._writer is not None and not self._writer.is_closing()
