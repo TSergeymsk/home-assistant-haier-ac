@@ -78,16 +78,20 @@ class HaierProtocol:
     def _build_frame(self, frame_type: int, data: bytes = b'', with_crc: bool = False) -> bytes:
         """Build a frame according to actual Haier protocol."""
         # Based on packet analysis: 
-        # [separator][length][flags][4-byte reserved][type][data][checksum]
-        # Checksum appears to be simple sum of flags, reserved, type, and data (excluding length)
+        # [separator][length][flags][4-byte reserved][command][data][checksum]
+        # command seems to be always 0x01 in responses, but we need to verify for outgoing
         
         flags = FRAME_FLAG_WITH_CRC if with_crc else FRAME_FLAG_NO_CRC
         reserved = b'\x00' * 4  # 4 bytes, not 5!
         
-        # Build frame without separator, length, and checksum
-        frame_without_extras = bytes([flags]) + reserved + bytes([frame_type]) + data
+        # For outgoing frames, command is probably 0x01 (based on incoming frames)
+        command = 0x01
         
-        # Calculate length (includes: flags(1) + reserved(4) + type(1) + data(n) + checksum(1))
+        # Build frame without separator, length, and checksum
+        # Structure: flags + reserved + command + frame_type + data
+        frame_without_extras = bytes([flags]) + reserved + bytes([command]) + bytes([frame_type]) + data
+        
+        # Calculate length (includes: flags(1) + reserved(4) + command(1) + frame_type(1) + data(n) + checksum(1))
         length = len(frame_without_extras) + 1  # +1 for checksum
         
         # Calculate checksum (sum of frame_without_extras)
@@ -96,7 +100,7 @@ class HaierProtocol:
         # Build final frame
         frame = FRAME_SEPARATOR + bytes([length]) + frame_without_extras + bytes([checksum])
         
-        _LOGGER.debug(f"Built frame: length={length}, type=0x{frame_type:02x}, checksum=0x{checksum:02x}")
+        _LOGGER.debug(f"Built frame: length={length}, command=0x{command:02x}, type=0x{frame_type:02x}, checksum=0x{checksum:02x}")
         _LOGGER.debug(f"Frame bytes: {frame.hex()}")
         
         return frame
@@ -156,6 +160,12 @@ class HaierProtocol:
         control_data.extend([0x00, temp_offset])
         
         return self._build_frame(CMD_TYPE_CONTROL, bytes(control_data), with_crc=False)
+    
+    def create_ack_packet(self) -> bytes:
+        """Create ACK packet to acknowledge received frames."""
+        # ACK packet data might be empty or contain status
+        ack_data = bytes([0x00])  # Simple ACK
+        return self._build_frame(CMD_TYPE_ACK, ack_data, with_crc=False)
     
     def parse_response(self, data: bytes) -> List[Dict[str, Any]]:
         """Parse response frames from device."""
@@ -218,7 +228,8 @@ class HaierProtocol:
             return None
         
         reserved = frame_data[reserved_start:reserved_end]
-        frame_type = frame_data[reserved_end]
+        # The byte after reserved is command (always 0x01 in incoming frames)
+        command = frame_data[reserved_end]
         
         data_start = reserved_end + 1
         checksum_pos = length - 1
@@ -227,7 +238,16 @@ class HaierProtocol:
             return None
         
         checksum = frame_data[checksum_pos]
+        # The actual frame data starts from data_start, but the first byte of that data is the real frame type
         frame_data_bytes = frame_data[data_start:checksum_pos] if data_start < checksum_pos else b''
+        
+        if len(frame_data_bytes) == 0:
+            _LOGGER.debug("No frame data bytes")
+            return None
+        
+        # The first byte of frame_data_bytes is the actual frame type
+        frame_type = frame_data_bytes[0]
+        actual_data = frame_data_bytes[1:]  # The rest is the actual data
         
         # DEBUG: Try different checksum algorithms
         bytes_without_checksum = frame_data[1:checksum_pos]  # From flags to before checksum
@@ -248,14 +268,15 @@ class HaierProtocol:
         _LOGGER.debug(f"  Bytes for check ({len(bytes_without_checksum)}): {bytes_without_checksum.hex()}")
         
         # Parse frame data (skip checksum verification for now)
-        parsed_data = self._parse_frame_data(frame_type, frame_data_bytes)
+        parsed_data = self._parse_frame_data(frame_type, actual_data)
         
         return {
             'frame_length': total_frame_size,
             'flags': flags,
-            'type': frame_type,
+            'command': command,  # The byte after reserved (0x01 for all packets?)
+            'type': frame_type,  # Actual frame type from data (0x04, 0x06, etc.)
             'data': parsed_data,
-            'raw_data': frame_data_bytes,
+            'raw_data': actual_data,
             'checksum_ok': False,  # Temporarily set to False
             'checksum_expected': checksum,
             'checksum_calculated': simple_sum,
@@ -267,20 +288,19 @@ class HaierProtocol:
         
         _LOGGER.debug(f"Parsing frame data: type=0x{frame_type:02x}, data={data.hex()}")
         
-        if frame_type == 0x01:  # First packet type
+        if frame_type == 0x04:  # ACK frame
             if len(data) >= 1:
-                result['unknown_type_01'] = True
-                result['data'] = data.hex()
-                # Try to interpret as ACK
+                result['ack'] = True
+                result['ack_data'] = data.hex()
+                # Sometimes ACK may contain status
                 if len(data) >= 2:
-                    result['ack_subtype'] = data[0]
                     result['ack_status'] = data[1]
         
         elif frame_type == 0x06:  # Response frame with device state
             # Parse response frame with device data
             if len(data) >= 8:
                 try:
-                    # Based on packet: 6d01001d0013007f...
+                    # data: 6d01001d0013007f...
                     # Byte 0: 0x6d = 109 (unknown)
                     # Byte 1: 0x01 = 1 (power? mode?)
                     # Byte 2: 0x00 = 0
@@ -318,6 +338,9 @@ class HaierProtocol:
                     
                 except (IndexError, ValueError) as e:
                     _LOGGER.debug(f"Error parsing state frame: {e}")
+        else:
+            result['unknown_type'] = frame_type
+            result['data'] = data.hex()
         
         return result
     
