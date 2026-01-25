@@ -202,6 +202,7 @@ class HaierProtocol:
     
     def _parse_frame(self, data: bytes) -> Optional[Dict[str, Any]]:
         """Parse a single frame starting at the beginning of data."""
+        _LOGGER.debug(f"Full raw data chunk ({len(data)} bytes): {data.hex()}")
         if len(data) < 12:  # Minimum frame size
             return None
         
