@@ -15,6 +15,7 @@ from homeassistant.components.climate.const import (
     SWING_VERTICAL,
 )
 from homeassistant.const import ATTR_TEMPERATURE, TEMP_CELSIUS
+from homeassistant.const import UnitOfTemperature 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -88,7 +89,7 @@ class HaierClimateEntity(HaierEntity, ClimateEntity):
     _attr_fan_modes = list(HA_TO_HAIER_FAN.keys())
     _attr_swing_modes = list(HA_TO_HAIER_SWING.keys())
     _attr_target_temperature_step = 1.0
-    _attr_temperature_unit = TEMP_CELSIUS
+    _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_min_temp = 16
     _attr_max_temp = 30
     _attr_supported_features = (
