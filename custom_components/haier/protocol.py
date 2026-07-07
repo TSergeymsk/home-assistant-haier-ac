@@ -59,7 +59,7 @@ class HaierProtocol:
         mac_bytes = self._mac_address_bytes()
         zeros2 = bytes(16)
         seq_bytes = bytes([0x00, 0x00, 0x00, seq % 256])
-        cmd_len = bytes([0x00, 0x00, 0x00, 0x13])
+        cmd_len = bytes([0x00, 0x00, 0x00, 0x0D])
         command = bytes.fromhex('ff ff 0a 00 00 00 00 00 00 01 4d 01 59')
         
         return header + zeros + mac_bytes + zeros2 + seq_bytes + cmd_len + command
@@ -83,7 +83,7 @@ class HaierProtocol:
         mac_bytes = self._mac_address_bytes()
         zeros2 = bytes(16)
         seq_bytes = bytes([0x00, 0x00, 0x00, seq % 256])
-        cmd_len = bytes([0x00, 0x00, 0x00, 0x13])
+        cmd_len = bytes([0x00, 0x00, 0x00, 0x0D])
         command = bytes.fromhex('ff ff 0a 00 00 00 00 00 00 01 4d 02 5a')
         
         return header + zeros + mac_bytes + zeros2 + seq_bytes + cmd_len + command
@@ -95,7 +95,7 @@ class HaierProtocol:
         mac_bytes = self._mac_address_bytes()
         zeros2 = bytes(16)
         seq_bytes = bytes([0x00, 0x00, 0x00, seq % 256])
-        cmd_len = bytes([0x00, 0x00, 0x00, 0x13])
+        cmd_len = bytes([0x00, 0x00, 0x00, 0x0D])
         command = bytes.fromhex('ff ff 0a 00 00 00 00 00 00 01 4d 03 5b')
         
         return header + zeros + mac_bytes + zeros2 + seq_bytes + cmd_len + command
@@ -104,16 +104,15 @@ class HaierProtocol:
         """Create packet to set device state."""
         # Build command like in TS library
         hex_str = 'ff ff 22 00 00 00 00 00 00 01 4d 5f 00 00 00 00 00 00 00 00 00 00'
-        hex_str += f' 00 0{state.mode}'
-        hex_str += f' 00 0{state.fan_speed}'
-        hex_str += f' 00 0{state.limits}'
+        hex_str += f' 00 {state.mode:02x}'
+        hex_str += f' 00 {state.fan_speed:02x}'
+        hex_str += f' 00 {state.limits:02x}'
         power_byte = 9 if state.health else 1
-        hex_str += f' 00 0{power_byte}'
+        hex_str += f' 00 {power_byte:02x}'
         health_byte = 1 if state.health else 0
-        hex_str += f' 00 0{health_byte}'
-        hex_str += ' 00 00'
+        hex_str += f' 00 {health_byte:02x}'
         temp_offset = state.target_temperature - 16
-        hex_str += f' 00 0{temp_offset:x}'
+        hex_str += f' 00 {temp_offset:02x}'
         
         # Calculate checksum как в TS библиотеке
         hex_clean = hex_str.replace(' ', '')
@@ -125,7 +124,7 @@ class HaierProtocol:
             else:
                 total += digit
         
-        checksum = (total - 2 * 255) & 256
+        checksum = (total - 2 * 255) % 256
         hex_str += f' {checksum:02x}'
         
         command = bytes.fromhex(hex_str.replace(' ', ''))
