@@ -148,11 +148,8 @@ class HaierDevice:
                 _LOGGER.error(f"Failed to reconnect: {ex}")
                 return False
         
-        if seq is None:
-            seq = self._seq
-        
-        # Increment sequence как в TS библиотеке
-        self._seq = (seq + 1) % 256
+        seq = self._seq
+        self._seq = (self._seq + 1) % 256
         
         # Create command with sequence
         packet = create_command_func(seq)
@@ -301,14 +298,14 @@ class HaierDevice:
         def create_command(seq):
             return self.protocol.create_on_packet(seq)
         
-        return await self._send_request(create_command, seq=1)
+        return await self._send_request(create_command)
 
     async def off(self):
         """Turn device off."""
         def create_command(seq):
             return self.protocol.create_off_packet(seq)
         
-        return await self._send_request(create_command, seq=1)
+        return await self._send_request(create_command)
 
     async def change_state(self, new_state: Dict[str, Any]):
         """Change device state (partial update)."""
@@ -344,7 +341,7 @@ class HaierDevice:
         def create_command(seq):
             return self.protocol.create_set_state_packet(merged_state, seq)
         
-        return await self._send_request(create_command, seq=1, timeout=3.0)
+        return await self._send_request(create_command, timeout=3.0)
 
     async def set_health_mode(self, enabled: bool):
         """Set health mode on or off."""

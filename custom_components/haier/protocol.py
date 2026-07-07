@@ -125,7 +125,7 @@ class HaierProtocol:
             else:
                 total += digit
         
-        checksum = (total - 2 * 255) & 0xFF
+        checksum = (total - 2 * 255) & 256
         hex_str += f' {checksum:02x}'
         
         command = bytes.fromhex(hex_str.replace(' ', ''))
