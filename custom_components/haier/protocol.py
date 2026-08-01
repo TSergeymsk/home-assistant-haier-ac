@@ -25,8 +25,12 @@ class FanSpeed(IntEnum):
 
 
 class Limits(IntEnum):
-    """Limits (not used extensively)."""
-    NONE = 0
+    """Limits for swing and other settings (matches original TS library)."""
+    OFF = 0x00
+    VERTICAL = 0x01
+    HORIZONTAL = 0x02
+    BOTH = 0x03
+    NONE = 0x00   # alias for OFF
 
 
 class State:
@@ -125,7 +129,7 @@ class HaierProtocol:
         hex_str += f" 00 {state.mode:02x}"
         # word12 (grp7) – fan speed
         hex_str += f" 00 {state.fan_speed:02x}"
-        # word13 (grp8) – limits
+        # word13 (grp8) – limits (swing)
         hex_str += f" 00 {state.limits:02x}"
 
         # word14 (grp9) – power (bit0) + health (bit3)
@@ -182,6 +186,7 @@ class HaierProtocol:
 
         mode = cmd[24] if len(cmd) > 24 else 0
         fan_speed = cmd[26] if len(cmd) > 26 else 0
+        limits = cmd[28] if len(cmd) > 28 else 0
         power_health = cmd[30] if len(cmd) > 30 else 0
         health = bool(power_health & 0x08)
         temp_raw = cmd[36] if len(cmd) > 36 else 0
@@ -190,7 +195,7 @@ class HaierProtocol:
         return State(
             mode=mode,
             fan_speed=fan_speed,
-            limits=Limits.NONE,
+            limits=limits,
             health=health,
             target_temperature=target_temperature,
         )
