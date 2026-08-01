@@ -59,19 +59,24 @@ class HaierProtocol:
 
     def __init__(self, mac: str, device_type: int = 0x22):
         """Initialize protocol handler."""
+        self.mac = mac                     # публичный атрибут для device.py
         self._mac = mac.replace(":", "").lower()
         self._device_type = device_type
         self._seq = 0
 
     def _mac_address_bytes(self) -> bytes:
         """Convert MAC address to bytes (reversed order)."""
-        mac_clean = self._mac.replace(":", "")
+        mac_clean = self.mac.replace(":", "").lower()
         return bytes.fromhex(mac_clean)[::-1]
 
     def _next_seq(self) -> int:
         """Get next sequence number (0-255)."""
         self._seq = (self._seq + 1) % 256
         return self._seq
+
+    # Для обратной совместимости, если где-то используется _get_seq
+    def _get_seq(self) -> int:
+        return self._next_seq()
 
     def _build_packet(self, command: bytes, seq: int) -> bytes:
         """Wrap command with headers and MAC address."""
