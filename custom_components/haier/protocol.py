@@ -8,7 +8,6 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class Mode(IntEnum):
-    """Air conditioner operation modes."""
     AUTO = 0
     COOL = 1
     DRY = 2
@@ -17,7 +16,6 @@ class Mode(IntEnum):
 
 
 class FanSpeed(IntEnum):
-    """Fan speed levels."""
     AUTO = 0
     LOW = 1
     MEDIUM = 2
@@ -25,25 +23,16 @@ class FanSpeed(IntEnum):
 
 
 class Limits(IntEnum):
-    """Limits for swing and other settings (matches original TS library)."""
     OFF = 0x00
     VERTICAL = 0x01
     HORIZONTAL = 0x02
     BOTH = 0x03
-    NONE = 0x00   # alias for OFF
+    NONE = 0x00
 
 
 class State:
-    """State of the air conditioner."""
-
-    def __init__(
-        self,
-        mode: int = Mode.AUTO,
-        fan_speed: int = FanSpeed.AUTO,
-        limits: int = Limits.NONE,
-        health: bool = False,
-        target_temperature: int = 24,
-    ):
+    def __init__(self, mode=Mode.AUTO, fan_speed=FanSpeed.AUTO,
+                 limits=Limits.NONE, health=False, target_temperature=24):
         self.mode = mode
         self.fan_speed = fan_speed
         self.limits = limits
@@ -51,39 +40,26 @@ class State:
         self.target_temperature = target_temperature
 
     def __repr__(self):
-        return (
-            f"State(mode={self.mode}, fan_speed={self.fan_speed}, "
-            f"limits={self.limits}, health={self.health}, "
-            f"target_temperature={self.target_temperature})"
-        )
+        return (f"State(mode={self.mode}, fan_speed={self.fan_speed}, "
+                f"limits={self.limits}, health={self.health}, "
+                f"target_temperature={self.target_temperature})")
 
 
 class HaierProtocol:
-    """Protocol handler for Haier air conditioners."""
-
     def __init__(self, mac: str, device_type: int = 0x22):
-        """Initialize protocol handler."""
-        self.mac = mac                     # публичный атрибут для device.py
+        self.mac = mac
         self._mac = mac.replace(":", "").lower()
         self._device_type = device_type
         self._seq = 0
 
     def _mac_address_bytes(self) -> bytes:
-        """Convert MAC address to bytes (reversed order)."""
-        mac_clean = self.mac.replace(":", "").lower()
-        return bytes.fromhex(mac_clean)[::-1]
+        return bytes.fromhex(self._mac)[::-1]
 
     def _next_seq(self) -> int:
-        """Get next sequence number (0-255)."""
         self._seq = (self._seq + 1) % 256
         return self._seq
 
-    # Для обратной совместимости, если где-то используется _get_seq
-    def _get_seq(self) -> int:
-        return self._next_seq()
-
     def _build_packet(self, command: bytes, seq: int) -> bytes:
-        """Wrap command with headers and MAC address."""
         header = bytes.fromhex("00 00 27 14 00 00 00 00")
         zeros1 = bytes(16)
         mac_bytes = self._mac_address_bytes()
@@ -93,13 +69,10 @@ class HaierProtocol:
         return header + zeros1 + mac_bytes + zeros2 + seq_bytes + cmd_len_bytes + command
 
     def create_get_state_packet(self) -> bytes:
-        """Create packet to request current state."""
         seq = self._next_seq()
-        hex_str = (
-            "ff ff 22 00 00 00 00 00 00 01 4d 5f "
-            "00 00 00 00 00 00 00 00 00 00 "
-            "00 00 00 00 00 00 00 00 00 00 00 00"
-        )
+        hex_str = ("ff ff 22 00 00 00 00 00 00 01 4d 5f "
+                   "00 00 00 00 00 00 00 00 00 00 "
+                   "00 00 00 00 00 00 00 00 00 00 00 00")
         hex_clean = hex_str.replace(" ", "")
         total = 0
         for i, c in enumerate(hex_clean):
@@ -113,37 +86,18 @@ class HaierProtocol:
         command = bytes.fromhex(hex_str.replace(" ", ""))
         return self._build_packet(command, seq)
 
-    # ========== ИСПРАВЛЕННАЯ ФУНКЦИЯ ==========
     def create_set_state_packet(self, state: State) -> bytes:
-        """
-        Create packet to set device state.
-        FIXED: power and health are packed into one byte (bit0=power, bit3=health),
-        extra health byte removed, temperature placed correctly.
-        """
         seq = self._next_seq()
-
-        # Base template (22 bytes)
         hex_str = "ff ff 22 00 00 00 00 00 00 01 4d 5f 00 00 00 00 00 00 00 00 00 00"
-
-        # word11 (grp6) – mode
         hex_str += f" 00 {state.mode:02x}"
-        # word12 (grp7) – fan speed
         hex_str += f" 00 {state.fan_speed:02x}"
-        # word13 (grp8) – limits (swing)
         hex_str += f" 00 {state.limits:02x}"
-
-        # word14 (grp9) – power (bit0) + health (bit3)
         power_health = 0x01 | (0x08 if state.health else 0x00)
         hex_str += f" 00 {power_health:02x}"
-
-        # word15 (grp10) – always zero
         hex_str += " 00 00"
-
-        # word16 + word17 (grp11+grp12) – temperature (offset -16)
         temp_offset = state.target_temperature - 16
         hex_str += f" 00 00 00 {temp_offset:02x}"
-
-        # Checksum
+        # checksum
         hex_clean = hex_str.replace(" ", "")
         total = 0
         for i, c in enumerate(hex_clean):
@@ -154,36 +108,27 @@ class HaierProtocol:
                 total += digit
         checksum = (total - 2 * 255) % 256
         hex_str += f" {checksum:02x}"
-
         command = bytes.fromhex(hex_str.replace(" ", ""))
         return self._build_packet(command, seq)
 
-    # ==========================================
-
     def parse_response(self, data: bytes) -> Optional[State]:
-        """Parse response from device and return State object."""
         if len(data) < 44:
             _LOGGER.warning("Response too short")
             return None
-
         if data[0:4] != b'\x00\x00\x27\x14':
             _LOGGER.warning("Invalid response header")
             return None
-
-        offset = 8 + 16 + 6 + 16 + 4 + 4  # header + zeros + MAC + zeros + seq + length
+        offset = 8 + 16 + 6 + 16 + 4 + 4
         if len(data) < offset:
-            _LOGGER.warning("Not enough data to extract command")
+            _LOGGER.warning("Not enough data")
             return None
-
         cmd = data[offset:]
         if len(cmd) < 42:
             _LOGGER.warning("Command too short")
             return None
-
         if cmd[0:3] != b'\xff\xff\x22':
             _LOGGER.warning("Invalid command signature")
             return None
-
         mode = cmd[24] if len(cmd) > 24 else 0
         fan_speed = cmd[26] if len(cmd) > 26 else 0
         limits = cmd[28] if len(cmd) > 28 else 0
@@ -191,11 +136,4 @@ class HaierProtocol:
         health = bool(power_health & 0x08)
         temp_raw = cmd[36] if len(cmd) > 36 else 0
         target_temperature = temp_raw + 16
-
-        return State(
-            mode=mode,
-            fan_speed=fan_speed,
-            limits=limits,
-            health=health,
-            target_temperature=target_temperature,
-        )
+        return State(mode, fan_speed, limits, health, target_temperature)
