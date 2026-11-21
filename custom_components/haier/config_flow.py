@@ -13,7 +13,7 @@ from .const import (
     CONF_HEALTH_MODE,
     CONF_HEALTH_MODE_TYPE,
     HEALTH_MODE_TYPES,
-    DEFAULT_NAME
+    DEFAULT_NAME,
 )
 from .device import test_connection
 
@@ -43,11 +43,10 @@ class HaierConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(self, user_input: Optional[Dict[str, Any]] = None):
         """Handle the initial step."""
         errors = {}
-        
         if user_input is not None:
             # Store for testing
             self._test_ip = user_input[CONF_IP_ADDRESS]
-            
+
             # Validate MAC address format
             mac = user_input[CONF_MAC].upper().replace(":", "").replace("-", "")
             if len(mac) != 12 or not all(c in "0123456789ABCDEF" for c in mac):
@@ -58,27 +57,27 @@ class HaierConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 formatted_mac = ':'.join(mac[i:i+2] for i in range(0, 12, 2))
                 self._test_mac = formatted_mac
                 user_input[CONF_MAC] = formatted_mac
-                
+
                 # Test connection to device
                 try:
                     _LOGGER.info(f"Testing connection to {user_input[CONF_IP_ADDRESS]}:56800")
-                    
                     can_connect = await self.hass.async_add_executor_job(
-                        test_connection, user_input[CONF_IP_ADDRESS]
+                        test_connection,
+                        user_input[CONF_IP_ADDRESS]
                     )
-                    
+
                     if can_connect:
                         # Create unique ID from MAC address
                         await self.async_set_unique_id(formatted_mac)
                         self._abort_if_unique_id_configured()
-                        
+
                         # Store timeout in options
                         timeout = user_input.pop("timeout", 5000)
                         options = {"timeout": timeout}
-                        
+
                         # Prepare data without timeout
                         data = {k: v for k, v in user_input.items() if k != "timeout"}
-                        
+
                         return self.async_create_entry(
                             title=user_input[CONF_NAME],
                             data=data,
@@ -90,14 +89,12 @@ class HaierConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             f"Cannot connect to device at {user_input[CONF_IP_ADDRESS]}:56800. "
                             f"Please ensure the device is powered on and connected to the network."
                         )
-                        
                 except Exception as ex:
                     _LOGGER.error(f"Connection test exception: {ex}")
                     errors["base"] = "cannot_connect"
-        
+
         # Build schema with current values if available
         schema = self.build_schema(user_input if user_input else {})
-        
         return self.async_show_form(
             step_id="user",
             data_schema=schema,
@@ -106,7 +103,7 @@ class HaierConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "ip_example": "192.168.4.68",
                 "mac_example": "18:A7:F1:2C:F3:9B",
                 "note": "Note: Device must be powered on and connected to your local network. "
-                       "Port 56800 will be used for communication."
+                        "Port 56800 will be used for communication."
             }
         )
 
@@ -114,7 +111,7 @@ class HaierConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Build schema with current values."""
         return vol.Schema({
             vol.Required(
-                CONF_IP_ADDRESS, 
+                CONF_IP_ADDRESS,
                 default=data.get(CONF_IP_ADDRESS, "")
             ): str,
             vol.Required(
@@ -143,24 +140,20 @@ class HaierConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @callback
     def async_get_options_flow(config_entry):
         """Get the options flow for this handler."""
-        return HaierOptionsFlowHandler(config_entry)
+        return HaierOptionsFlowHandler()
 
 
 class HaierOptionsFlowHandler(config_entries.OptionsFlow):
     """Handle Haier AC options."""
-    
-    def __init__(self, config_entry):
-        """Initialize options flow."""
-        self.config_entry = config_entry
-    
+
     async def async_step_init(self, user_input=None):
         """Manage the options."""
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
-        
+
         # Get current options or use defaults
         current_timeout = self.config_entry.options.get("timeout", 5000)
-        
+
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema({
