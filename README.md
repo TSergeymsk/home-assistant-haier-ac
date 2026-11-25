@@ -212,7 +212,7 @@ This integration is not officially supported by Haier. Use at your own risk. The
 ## Acknowledgments
 
 - Based on reverse engineering of the official Haier protocol
-- Inspired by the [haier-ac-remote]((https://github.com/bstuff/haier-ac-remote)) project
+- Inspired by the [haier-ac-remote](https://github.com/bstuff/haier-ac-remote) project
 - Thanks to all contributors and testers
 
 ## Support
