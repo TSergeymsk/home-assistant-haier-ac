@@ -1,423 +1,245 @@
-"""Device class for Haier AC."""
+"""TCP transport for a Haier AC unit."""
+from __future__ import annotations
 
-import binascii
 import asyncio
 import logging
-import socket
-from typing import Optional, Dict, Any
-from datetime import datetime, timedelta
+from typing import Any, Callable
 
-import async_timeout
-
-from .protocol import HaierProtocol, State, FanSpeed, Mode, Limits
+from .const import DEFAULT_PORT
+from .protocol import CMD_STATUS, HaierProtocol
 
 _LOGGER = logging.getLogger(__name__)
 
-# Параметры повторных попыток подключения
-MAX_CONNECT_RETRIES = 4
-CONNECT_RETRY_DELAY = 10  # секунд
+CONNECT_TIMEOUT: float = 10.0
+RESPONSE_TIMEOUT: float = 5.0
+RECONNECT_BASE_DELAY: float = 2.0
+RECONNECT_MAX_DELAY: float = 60.0
+RECONNECT_MAX_ATTEMPTS: int = 10
+COMMAND_GAP: float = 0.15  # 150 ms — matches TS library default
+LISTEN_IDLE_SLEEP: float = 1.0
 
 
-def test_connection(ip_address: str) -> bool:
-    """Test TCP connection to Haier device on port 56800."""
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(5.0)
-        result = sock.connect_ex((ip_address, 56800))
-        sock.close()
-        if result == 0:
-            _LOGGER.debug(f"Successfully connected to {ip_address}:56800")
-            return True
-        else:
-            _LOGGER.debug(f"Failed to connect to {ip_address}:56800 (error code: {result})")
-            return False
-    except Exception as ex:
-        _LOGGER.debug(f"Connection test failed for {ip_address}:56800: {ex}")
-        return False
+class DeviceNotAvailable(Exception):
+    """Raised when the AC cannot be reached for a command."""
 
 
 class HaierDevice:
-    """Representation of a Haier AC device."""
+    """Owns the TCP connection, reconnection, command gap and state cache."""
 
-    def __init__(self, hass, ip_address, mac, name, health_mode=False,
-                 health_mode_type="switch", timeout=5000):
-        """Initialize the device."""
-        self.hass = hass
-        self.ip_address = ip_address
-        self.port = 56800
-        self.name = name
-        self._health_mode = health_mode
-        self._health_mode_type = health_mode_type
-        self.timeout = timeout / 1000.0
+    def __init__(self, host: str, port: int = DEFAULT_PORT) -> None:
+        self._host = host
+        self._port = port
+        self._reader: asyncio.StreamReader | None = None
+        self._writer: asyncio.StreamWriter | None = None
+        self._connect_lock = asyncio.Lock()
+        self._command_lock = asyncio.Lock()
+        self._pending: list[asyncio.Future[bytes]] = []
+        self._last_command_ts: float = 0.0
+        self._reconnect_attempts: int = 0
+        self._running: bool = False
+        self._listen_task: asyncio.Task[None] | None = None
+        self._loop = asyncio.get_event_loop()
+        self.protocol = HaierProtocol()
+        self.state: dict[str, Any] = {}
+        self._listeners: list[Callable[[dict[str, Any]], None]] = []
 
-        # Protocol handler
-        self.protocol = HaierProtocol(mac)
+    # ----- listeners -----
+    def add_listener(self, cb: Callable[[dict[str, Any]], None]) -> None:
+        self._listeners.append(cb)
 
-        # Current state
-        self._state = State()
-        self._state_lock = asyncio.Lock()
+    def remove_listener(self, cb: Callable[[dict[str, Any]], None]) -> None:
+        if cb in self._listeners:
+            self._listeners.remove(cb)
 
-        # Connection
-        self._reader = None
-        self._writer = None
-        self._listen_task = None          # <-- ДОБАВЛЕНО: храним ссылку на задачу-слушатель
-        self._connected = False
-        self._last_update = None
-        self._update_interval = timedelta(seconds=30)
-
-        # Sequence number (как в TS библиотеке)
-        self._seq = 0
-
-        # Response handling
-        self._response_events = {}
-
-        _LOGGER.info(f"Initialized Haier device {name} at {ip_address}:{self.port}")
-
-    async def async_connect(self):
-        """Connect to the device using official protocol with retries."""
-        last_exception = None
-        for attempt in range(1, MAX_CONNECT_RETRIES + 1):
+    def _notify(self, state: dict[str, Any]) -> None:
+        for cb in self._listeners:
             try:
-                # Test connection first
-                if not await self.hass.async_add_executor_job(
-                    test_connection, self.ip_address
-                ):
-                    raise ConnectionError(
-                        f"Cannot connect to device at {self.ip_address}:{self.port}"
-                    )
+                cb(state)
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Listener callback failed")
 
-                # Establish TCP connection (как в TS библиотеке)
-                await self._establish_connection()
-                self._connected = True
-                _LOGGER.info(f"Connected to Haier device {self.name}")
-                return
-            except Exception as ex:
-                last_exception = ex
-                if attempt < MAX_CONNECT_RETRIES:
-                    _LOGGER.debug(
-                        f"Connection attempt {attempt}/{MAX_CONNECT_RETRIES} failed for {self.name}: {ex}. "
-                        f"Retrying in {CONNECT_RETRY_DELAY} seconds..."
-                    )
-                    await asyncio.sleep(CONNECT_RETRY_DELAY)
-                else:
-                    _LOGGER.error(
-                        f"Failed to connect to device {self.name} after "
-                        f"{MAX_CONNECT_RETRIES} attempts: {ex}"
-                    )
-
-        # После всех попыток
-        await self._close_connection()
-        raise last_exception
-
-    async def _establish_connection(self):
-        """Establish TCP connection."""
-        # --- ИЗМЕНЕНО: отменяем предыдущую задачу-слушатель, если она ещё жива ---
-        if self._listen_task and not self._listen_task.done():
-            self._listen_task.cancel()
-            try:
-                await self._listen_task
-            except asyncio.CancelledError:
-                pass
-        # ---------------------------------------------------------------------
-
-        try:
-            self._reader, self._writer = await asyncio.wait_for(
-                asyncio.open_connection(self.ip_address, self.port),
-                timeout=self.timeout
+    # ----- lifecycle -----
+    async def start(self) -> None:
+        self._running = True
+        if not await self.async_connect():
+            _LOGGER.warning(
+                "Initial connect to %s:%s failed; will retry on next command",
+                self._host, self._port,
             )
-            # Start listening task (теперь это единственная активная задача-читатель)
-            self._listen_task = asyncio.create_task(self._listen_for_responses())
-        except asyncio.TimeoutError:
-            raise ConnectionError(f"Connection timeout to {self.ip_address}:{self.port}")
-        except Exception as ex:
-            raise ConnectionError(f"Failed to establish connection: {ex}")
+        self._listen_task = asyncio.create_task(self._listen_for_responses())
 
-    async def async_disconnect(self):
-        """Disconnect from the device."""
-        await self._close_connection()
-        self._connected = False
-        _LOGGER.info(f"Disconnected from Haier device {self.name}")
-
-    async def _close_connection(self):
-        """Close TCP connection."""
-        # Cancel listening task if hasattr(self, '_listen_task'):
-        if self._listen_task:
+    async def stop(self) -> None:
+        self._running = False
+        if self._listen_task is not None:
             self._listen_task.cancel()
             try:
                 await self._listen_task
             except asyncio.CancelledError:
                 pass
             self._listen_task = None
+        await self.async_disconnect()
 
-        if self._writer:
+    async def async_disconnect(self) -> None:
+        if self._writer is not None:
             try:
                 self._writer.close()
                 await self._writer.wait_closed()
-            except:
+            except (ConnectionError, OSError):
                 pass
         self._reader = None
         self._writer = None
 
-    async def _send_raw_packet(self, packet: bytes):
-        """Send raw packet to device."""
-        if not self._writer:
-            raise ConnectionError("Not connected to device")
+    # ----- connect with backoff (single-flight) -----
+    async def async_connect(self) -> bool:
+        async with self._connect_lock:
+            if self._writer is not None and not self._writer.is_closing():
+                return True
+
+            delay = RECONNECT_BASE_DELAY
+            for attempt in range(1, RECONNECT_MAX_ATTEMPTS + 1):
+                try:
+                    self._reader, self._writer = await asyncio.wait_for(
+                        asyncio.open_connection(self._host, self._port),
+                        timeout=CONNECT_TIMEOUT,
+                    )
+                    self._reconnect_attempts = 0
+                    _LOGGER.info(
+                        "Connected to Haier device %s:%s", self._host, self._port
+                    )
+                    return True
+                except (OSError, asyncio.TimeoutError) as exc:
+                    _LOGGER.warning(
+                        "Connection attempt %d/%d to %s failed: %s",
+                        attempt, RECONNECT_MAX_ATTEMPTS, self._host, exc,
+                    )
+                    if attempt < RECONNECT_MAX_ATTEMPTS:
+                        await asyncio.sleep(delay)
+                        delay = min(delay * 2, RECONNECT_MAX_DELAY)
+
+            _LOGGER.error(
+                "Giving up on %s after %d connection attempts",
+                self._host, RECONNECT_MAX_ATTEMPTS,
+            )
+            return False
+
+    async def _handle_connection_lost(self) -> None:
+        if self._writer is not None:
+            try:
+                self._writer.close()
+                await self._writer.wait_closed()
+            except (ConnectionError, OSError):
+                pass
+        self._reader = None
+        self._writer = None
+
+    # ----- listen/parse -----
+    async def _listen_for_responses(self) -> None:
+        """Read from the socket forever; never die on a single bad frame."""
+        while self._running:
+            reader = self._reader
+            if reader is None:
+                await asyncio.sleep(LISTEN_IDLE_SLEEP)
+                continue
+
+            try:
+                data = await reader.read(1024)
+            except asyncio.CancelledError:
+                raise
+            except (ConnectionError, OSError) as exc:
+                _LOGGER.warning("Read error from %s: %s", self._host, exc)
+                data = b""
+
+            if not data:
+                if not self._running:
+                    break
+                await self._handle_connection_lost()
+                if not await self.async_connect():
+                    _LOGGER.error(
+                        "Cannot reconnect to %s; next command will retry", self._host
+                    )
+                continue
+
+            try:
+                frames = self.protocol.parse_response(data)
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception(
+                    "Unhandled error while parsing response from %s", self._host
+                )
+                continue
+
+            for frame in frames:
+                try:
+                    self._dispatch_frame(frame)
+                except Exception:  # noqa: BLE001
+                    _LOGGER.exception(
+                        "Error handling frame from %s: %s",
+                        self._host, frame.get("raw", b"").hex(),
+                    )
+
+    def _dispatch_frame(self, frame: dict[str, Any]) -> None:
+        payload = frame.get("payload", b"")
+        if payload and payload[0] == CMD_STATUS:
+            self._update_state(payload)
+        if self._pending:
+            future = self._pending.pop(0)
+            if not future.done():
+                future.set_result(frame["raw"])
+
+    def _update_state(self, payload: bytes) -> None:
+        """Decode status payload into the cached state and notify listeners."""
+        if len(payload) < 4:
+            return
+        self.state = {
+            "raw": payload.hex(),
+            "power": bool(payload[1] & 0x01),
+            "mode": payload[2],
+            "temperature": 16.0 + (payload[3] >> 1),
+        }
+        self._notify(self.state)
+
+    # ----- command path -----
+    async def _send_request(
+        self, packet: bytes, expect_response: bool = True
+    ) -> bytes | None:
+        """Send one packet. Caller MUST hold self._command_lock."""
+        if self._writer is None or self._writer.is_closing():
+            if not await self.async_connect():
+                raise DeviceNotAvailable(f"Cannot connect to {self._host}")
+
         try:
+            assert self._writer is not None
             self._writer.write(packet)
             await self._writer.drain()
-            _LOGGER.debug(f"Sent packet: {binascii.hexlify(packet).decode()}")
-        except Exception as ex:
-            _LOGGER.error(f"Failed to send packet: {ex}")
-            self._connected = False
-            raise
+        except (ConnectionError, OSError) as exc:
+            _LOGGER.warning("Write to %s failed: %s", self._host, exc)
+            await self._handle_connection_lost()
+            raise DeviceNotAvailable(str(exc)) from exc
 
-    async def _send_request(self, create_command_func, seq: int = None, timeout: float = 2.0):
-        """Send request and wait for response (like in TS library)."""
-        if not self._connected:
-            try:
-                await self.async_connect()
-            except Exception as ex:
-                _LOGGER.error(f"Failed to reconnect: {ex}")
-                return False
+        if not expect_response:
+            return None
 
-        seq = self._seq
-        self._seq = (self._seq + 1) % 256
-
-        # Create command with sequence
-        packet = create_command_func(seq)
-
-        # Create event for waiting response
-        response_event = asyncio.Event()
-        self._response_events[seq] = {'event': response_event, 'data': None}
-
+        future: asyncio.Future[bytes] = self._loop.create_future()
+        self._pending.append(future)
         try:
-            # Send packet
-            await self._send_raw_packet(packet)
-
-            # Wait for response with timeout
-            async with async_timeout.timeout(timeout):
-                await response_event.wait()
-
-            # Get response data
-            response_data = self._response_events[seq]['data']
-            return response_data is not None
-
+            async with asyncio.timeout(RESPONSE_TIMEOUT):
+                return await future
         except asyncio.TimeoutError:
-            _LOGGER.warning(f"Timeout waiting for response with seq {seq}")
-            # Try to reconnect как в TS библиотеке
-            try:
-                await self._close_connection()
-                await self.async_connect()
-            except:
-                pass
-            return False
-        finally:
-            # Clean up
-            if seq in self._response_events:
-                del self._response_events[seq]
-
-    async def _listen_for_responses(self):
-        """Listen for responses from device."""
-        _LOGGER.debug("Starting to listen for responses")
-        while True:
-            try:
-                if not self._reader:
-                    await asyncio.sleep(0.1)
-                    continue
-
-                # Read data with timeout
-                try:
-                    async with async_timeout.timeout(1.0):
-                        data = await self._reader.read(4096)
-                except asyncio.TimeoutError:
-                    # Timeout is normal, just continue listening
-                    continue
-
-                if not data:
-                    # --- ИЗМЕНЕНО: не переподключаемся из слушателя, просто выходим ---
-                    _LOGGER.debug("Connection closed by device")
-                    self._connected = False
-                    break
-                    # ------------------------------------------------------------------
-
-                _LOGGER.debug(f"Received {len(data)} bytes from device")
-
-                # Parse responses
-                responses = self.protocol.parse_response(data)
-
-                for response in responses:
-                    frame_type = response.get('type')
-                    seq = response.get('seq')
-
-                    # Safe logging
-                    try:
-                        if frame_type is not None:
-                            _LOGGER.debug(f"Parsed response: type=0x{frame_type:02x}, seq={seq}")
-                    except Exception as log_ex:
-                        _LOGGER.debug(f"Error logging response: {log_ex}")
-
-                    # Update device state if we have state data
-                    if frame_type == 0x22:  # State response
-                        state_data = response.get('data', {})
-                        if state_data:
-                            async with self._state_lock:
-                                # Update device state from parsed data
-                                if 'power' in state_data:
-                                    self._state.power = state_data['power']
-                                if 'mode' in state_data:
-                                    self._state.mode = state_data['mode']
-                                if 'target_temperature' in state_data:
-                                    self._state.target_temperature = state_data['target_temperature']
-                                if 'current_temperature' in state_data:
-                                    self._state.current_temperature = state_data['current_temperature']
-                                if 'fan_speed' in state_data:
-                                    self._state.fan_speed = state_data['fan_speed']
-                                if 'health' in state_data:
-                                    self._state.health = state_data['health']
-                                if 'limits' in state_data:
-                                    self._state.limits = state_data['limits']
-                                self._last_update = datetime.now()
-
-                                _LOGGER.debug(
-                                    f"State updated: power={self._state.power}, "
-                                    f"mode={self._state.mode}, target_temp={self._state.target_temperature}, "
-                                    f"current_temp={self._state.current_temperature}, fan_speed={self._state.fan_speed}, "
-                                    f"health={self._state.health}, limits={self._state.limits}"
-                                )
-
-                    # Signal waiter if this is the expected response
-                    if seq is not None and seq in self._response_events:
-                        self._response_events[seq]['data'] = response
-                        self._response_events[seq]['event'].set()
-                        _LOGGER.debug(f"Signaled waiter for seq {seq}")
-
-            except asyncio.CancelledError:
-                _LOGGER.debug("Listening task cancelled")
-                break
-            except ConnectionResetError:
-                # --- ИЗМЕНЕНО: также не переподключаемся из слушателя ---
-                _LOGGER.debug("Connection reset by peer")
-                self._connected = False
-                break
-                # ------------------------------------------------------------
-            except Exception as ex:
-                _LOGGER.error(f"Error in listen task: {ex}")
-                await asyncio.sleep(1)  # Avoid tight loop on error
-
-        _LOGGER.debug("Stopped listening for responses")
-
-    async def update(self):
-        """Update device state by requesting current state."""
-        # Don't send status request - device sends updates automatically
-        # Just check if we're connected
-        if not self._connected:
-            try:
-                await self.async_connect()
-            except:
-                return False
-        return True
-
-    # Command methods matching TS library
-    async def on(self):
-        """Turn device on."""
-        def create_command(seq):
-            return self.protocol.create_on_packet(seq)
-        return await self._send_request(create_command)
-
-    async def off(self):
-        """Turn device off."""
-        def create_command(seq):
-            return self.protocol.create_off_packet(seq)
-        return await self._send_request(create_command)
-
-    async def change_state(self, new_state: Dict[str, Any]):
-        """Change device state (partial update)."""
-        # Ensure power is on if we're changing state (like in TS library)
-        if not self._state.power and any(k in new_state for k in ['mode', 'fan_speed', 'target_temperature', 'limits', 'health']):
-            success = await self.on()
-            if not success:
-                return False
-
-        # Apply state validation like in TS library
-        if 'target_temperature' in new_state:
-            target_temp = new_state['target_temperature']
-            # Clamp temperature как в TS библиотеке
-            if target_temp < 16:
-                target_temp = 16
-            if target_temp > 30:
-                target_temp = 30
-            target_temp = round(target_temp)
-            new_state['target_temperature'] = target_temp
-
-        # Merge with current state
-        async with self._state_lock:
-            merged_state = State(
-                current_temperature=self._state.current_temperature,
-                target_temperature=new_state.get('target_temperature', self._state.target_temperature),
-                fan_speed=new_state.get('fan_speed', self._state.fan_speed),
-                mode=new_state.get('mode', self._state.mode),
-                health=new_state.get('health', self._state.health),
-                limits=new_state.get('limits', self._state.limits),
-                power=True  # Already ensured to be on
+            if future in self._pending:
+                self._pending.remove(future)
+            _LOGGER.warning(
+                "No response from %s within %.1fs; keeping socket (not reconnecting)",
+                self._host, RESPONSE_TIMEOUT,
             )
+            return None
 
-        def create_command(seq):
-            return self.protocol.create_set_state_packet(merged_state, seq)
-        return await self._send_request(create_command, timeout=3.0)
-
-    async def set_health_mode(self, enabled: bool):
-        """Set health mode on or off."""
-        return await self.change_state({'health': enabled})
-
-    # Property accessors for Home Assistant
-    @property
-    def power(self):
-        """Return power state."""
-        return self._state.power
-
-    @property
-    def mode(self):
-        """Return current mode."""
-        return self._state.mode
-
-    @property
-    def target_temperature(self):
-        """Return target temperature."""
-        return self._state.target_temperature
-
-    @property
-    def current_temperature(self):
-        """Return current temperature."""
-        return self._state.current_temperature
-
-    @property
-    def fan_speed(self):
-        """Return fan speed."""
-        return self._state.fan_speed
-
-    @property
-    def swing_mode(self):
-        """Return swing mode."""
-        return self._state.limits
-
-    @property
-    def health_mode(self):
-        """Return health mode state."""
-        return self._state.health
-
-    @property
-    def mac(self):
-        """Return MAC address."""
-        return self.protocol.mac
-
-    @property
-    def available(self):
-        """Return True if device is available."""
-        if self._last_update is None:
-            return False
-        return datetime.now() - self._last_update < timedelta(minutes=5)
-
-    @property
-    def is_connected(self):
-        """Return True if connected to device."""
-        return self._connected and self._writer is not None and not self._writer.is_closing()
+    async def async_send_command(self, packet: bytes) -> bytes | None:
+        """Public entry point: serialise commands and enforce COMMAND_GAP."""
+        async with self._command_lock:
+            now = self._loop.time()
+            wait = self._last_command_ts + COMMAND_GAP - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+            try:
+                return await self._send_request(packet)
+            finally:
+                self._last_command_ts = self._loop.time()
