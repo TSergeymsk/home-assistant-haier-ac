@@ -35,7 +35,7 @@ This custom integration allows you to control Haier air conditioners through you
 
 ### Method 2: Manual Installation
 
-1. Download the latest release from the [Releases](https://github.com/your-username/haier-ac-homeassistant/releases) section
+1. Download the latest release from the [Releases](https://github.com/TSergeymsk/haier-ac-homeassistant/releases) section
 
 2. Copy the `custom_components/haier` folder to your Home Assistant `custom_components` directory
 
@@ -195,16 +195,6 @@ custom_components/haier/
 
 This integration can be extended to support additional features or device models. The protocol implementation is modular and can be adapted for similar Haier devices.
 
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the repository
-2. Create a feature branch
-3. Commit your changes
-4. Push to the branch
-5. Open a Pull Request
-
 ## Disclaimer
 
 This integration is not officially supported by Haier. Use at your own risk. The developers are not responsible for any damage to your devices.
@@ -214,13 +204,6 @@ This integration is not officially supported by Haier. Use at your own risk. The
 - Based on reverse engineering of the official Haier protocol
 - Inspired by the [haier-ac-remote](https://github.com/bstuff/haier-ac-remote) project
 - Thanks to all contributors and testers
-
-## Support
-
-For support, please:
-1. Check the [Troubleshooting](#troubleshooting) section
-2. Search existing [Issues](https://github.com/your-username/haier-ac-homeassistant/issues)
-3. Open a new issue if your problem isn't already reported
 
 ---
 
