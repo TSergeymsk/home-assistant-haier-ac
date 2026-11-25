@@ -1,4 +1,5 @@
 """Device class for Haier AC."""
+
 import binascii
 import asyncio
 import logging
@@ -38,7 +39,8 @@ def test_connection(ip_address: str) -> bool:
 class HaierDevice:
     """Representation of a Haier AC device."""
 
-    def __init__(self, hass, ip_address, mac, name, health_mode=False, health_mode_type="switch", timeout=5000):
+    def __init__(self, hass, ip_address, mac, name, health_mode=False,
+                 health_mode_type="switch", timeout=5000):
         """Initialize the device."""
         self.hass = hass
         self.ip_address = ip_address
@@ -58,6 +60,7 @@ class HaierDevice:
         # Connection
         self._reader = None
         self._writer = None
+        self._listen_task = None          # <-- ДОБАВЛЕНО: храним ссылку на задачу-слушатель
         self._connected = False
         self._last_update = None
         self._update_interval = timedelta(seconds=30)
@@ -76,10 +79,13 @@ class HaierDevice:
         for attempt in range(1, MAX_CONNECT_RETRIES + 1):
             try:
                 # Test connection first
-                if not await self.hass.async_add_executor_job(test_connection, self.ip_address):
+                if not await self.hass.async_add_executor_job(
+                    test_connection, self.ip_address
+                ):
                     raise ConnectionError(
                         f"Cannot connect to device at {self.ip_address}:{self.port}"
                     )
+
                 # Establish TCP connection (как в TS библиотеке)
                 await self._establish_connection()
                 self._connected = True
@@ -95,20 +101,31 @@ class HaierDevice:
                     await asyncio.sleep(CONNECT_RETRY_DELAY)
                 else:
                     _LOGGER.error(
-                        f"Failed to connect to device {self.name} after {MAX_CONNECT_RETRIES} attempts: {ex}"
+                        f"Failed to connect to device {self.name} after "
+                        f"{MAX_CONNECT_RETRIES} attempts: {ex}"
                     )
+
         # После всех попыток
         await self._close_connection()
         raise last_exception
 
     async def _establish_connection(self):
         """Establish TCP connection."""
+        # --- ИЗМЕНЕНО: отменяем предыдущую задачу-слушатель, если она ещё жива ---
+        if self._listen_task and not self._listen_task.done():
+            self._listen_task.cancel()
+            try:
+                await self._listen_task
+            except asyncio.CancelledError:
+                pass
+        # ---------------------------------------------------------------------
+
         try:
             self._reader, self._writer = await asyncio.wait_for(
                 asyncio.open_connection(self.ip_address, self.port),
                 timeout=self.timeout
             )
-            # Start listening task
+            # Start listening task (теперь это единственная активная задача-читатель)
             self._listen_task = asyncio.create_task(self._listen_for_responses())
         except asyncio.TimeoutError:
             raise ConnectionError(f"Connection timeout to {self.ip_address}:{self.port}")
@@ -123,13 +140,15 @@ class HaierDevice:
 
     async def _close_connection(self):
         """Close TCP connection."""
-        # Cancel listening task
-        if hasattr(self, '_listen_task'):
+        # Cancel listening task if hasattr(self, '_listen_task'):
+        if self._listen_task:
             self._listen_task.cancel()
             try:
                 await self._listen_task
             except asyncio.CancelledError:
                 pass
+            self._listen_task = None
+
         if self._writer:
             try:
                 self._writer.close()
@@ -215,16 +234,11 @@ class HaierDevice:
                     continue
 
                 if not data:
-                    # Connection closed
+                    # --- ИЗМЕНЕНО: не переподключаемся из слушателя, просто выходим ---
                     _LOGGER.debug("Connection closed by device")
                     self._connected = False
-                    # Try to reconnect
-                    try:
-                        await self._close_connection()
-                        await self.async_connect()
-                    except:
-                        pass
                     break
+                    # ------------------------------------------------------------------
 
                 _LOGGER.debug(f"Received {len(data)} bytes from device")
 
@@ -263,6 +277,7 @@ class HaierDevice:
                                 if 'limits' in state_data:
                                     self._state.limits = state_data['limits']
                                 self._last_update = datetime.now()
+
                                 _LOGGER.debug(
                                     f"State updated: power={self._state.power}, "
                                     f"mode={self._state.mode}, target_temp={self._state.target_temperature}, "
@@ -280,14 +295,11 @@ class HaierDevice:
                 _LOGGER.debug("Listening task cancelled")
                 break
             except ConnectionResetError:
-                _LOGGER.debug("Connection reset by peer, reconnecting...")
+                # --- ИЗМЕНЕНО: также не переподключаемся из слушателя ---
+                _LOGGER.debug("Connection reset by peer")
                 self._connected = False
-                try:
-                    await self._close_connection()
-                    await self.async_connect()
-                except:
-                    pass
                 break
+                # ------------------------------------------------------------
             except Exception as ex:
                 _LOGGER.error(f"Error in listen task: {ex}")
                 await asyncio.sleep(1)  # Avoid tight loop on error
@@ -351,7 +363,6 @@ class HaierDevice:
 
         def create_command(seq):
             return self.protocol.create_set_state_packet(merged_state, seq)
-
         return await self._send_request(create_command, timeout=3.0)
 
     async def set_health_mode(self, enabled: bool):
