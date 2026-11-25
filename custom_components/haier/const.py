@@ -1,21 +1,62 @@
-"""Constants for the Haier AC integration."""
-from __future__ import annotations
+"""Constants for Haier AC integration."""
+from typing import Final
 
-DOMAIN: str = "haier_ac"
+DOMAIN: Final = "haier"
+DEFAULT_NAME: Final = "Haier AC"
 
-CONF_HOST: str = "host"
-CONF_PORT: str = "port"
-CONF_NAME: str = "name"
-CONF_MAC: str = "mac"
+# Configuration keys
+CONF_IP_ADDRESS: Final = "ip_address"
+CONF_MAC: Final = "mac"
+CONF_NAME: Final = "name"
+CONF_HEALTH_MODE: Final = "health_mode"
+CONF_HEALTH_MODE_TYPE: Final = "health_mode_type"
+CONF_TIMEOUT: Final = "timeout"
 
-DEFAULT_PORT: int = 56800
-DEFAULT_NAME: str = "Haier AC"
+# Options
+HEALTH_MODE_TYPES: Final = ["switch", "light"]
 
-PLATFORMS: list[str] = ["climate"]
+# Platforms
+PLATFORMS: Final = ["climate", "switch", "light"]
 
-# Matches enum Mode from bstuff/haier-ac-remote
-HAIER_MODE_SMART: int = 0
-HAIER_MODE_COOL: int = 1
-HAIER_MODE_HEAT: int = 2
-HAIER_MODE_FAN: int = 3
-HAIER_MODE_DRY: int = 4
+# Default values
+DEFAULT_TIMEOUT: Final = 5000  # milliseconds
+DEFAULT_PORT: Final = 56800  # Port from your nmap scan
+DEFAULT_SCAN_INTERVAL: Final = 30
+
+# Haier-specific constants (based on haier-ac-remote)
+HAIER_MODE_OFF: Final = 0
+HAIER_MODE_AUTO: Final = 1
+HAIER_MODE_COOL: Final = 2
+HAIER_MODE_HEAT: Final = 3
+HAIER_MODE_FAN: Final = 4
+HAIER_MODE_DRY: Final = 5
+
+HAIER_FAN_AUTO: Final = 0
+HAIER_FAN_LOW: Final = 1
+HAIER_FAN_MEDIUM: Final = 2
+HAIER_FAN_HIGH: Final = 3
+
+HAIER_SWING_OFF: Final = 0
+HAIER_SWING_VERTICAL: Final = 1
+
+# Services
+SERVICE_SET_FAN_SPEED: Final = "set_fan_speed"
+SERVICE_SET_SWING_MODE: Final = "set_swing_mode"
+SERVICE_REFRESH: Final = "refresh"
+
+# Attributes
+ATTR_INSIDE_TEMPERATURE: Final = "inside_temperature"
+ATTR_OUTSIDE_TEMPERATURE: Final = "outside_temperature"
+ATTR_HUMIDITY: Final = "humidity"
+ATTR_FILTER_STATUS: Final = "filter_status"
+ATTR_ENERGY_CONSUMPTION: Final = "energy_consumption"
+ATTR_DEVICE_MAC: Final = "device_mac"
+ATTR_DEVICE_IP: Final = "device_ip"
+ATTR_CONNECTION_STATUS: Final = "connection_status"
+ATTR_LAST_UPDATE: Final = "last_update"
+
+# Error messages
+ERROR_CANNOT_CONNECT: Final = "cannot_connect"
+ERROR_INVALID_MAC: Final = "invalid_mac_format"
+ERROR_TIMEOUT: Final = "timeout"
+ERROR_UNKNOWN: Final = "unknown"
